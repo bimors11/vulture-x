@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.coverage
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.runtime-python/
+.runtime-python.zip
+.docker-config/
+.venv/
+build/
+dist/
+logs/

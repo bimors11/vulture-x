@@ -1,0 +1,61 @@
+project:
+  name: "vulture-x"
+  environment: "sitl"
+
+vehicle:
+  connection: "udpin:0.0.0.0:14550"
+  source_system: 191
+  source_component: 191
+  expected_autopilot: "ARDUPILOTMEGA"
+  expected_vehicle_type: "QUADROTOR"
+  guided_mode: "GUIDED"
+  recovery_mode: "RTL"
+  heartbeat_hz_min: 0.5
+
+target:
+  source: "cooperative_udp"
+  listen_host: "0.0.0.0"
+  listen_port: 15550
+  expected_frame: "WGS84_MSL"
+  minimum_confidence: 0.8
+  allowed_source_ids:
+    - "target-sitl-01"
+
+guidance:
+  type: "lead_pursuit"
+  update_rate_hz: 10.0
+  preferred_standoff_m: 50.0
+  lookahead_time_s: 2.0
+  lookahead_time_min_s: 0.5
+  lookahead_time_max_s: 5.0
+
+safety:
+  min_horizontal_separation_m: 30.0
+  min_vertical_separation_m: 15.0
+  max_closure_rate_mps: 5.0
+  max_groundspeed_mps: 15.0
+  max_vertical_speed_mps: 3.0
+  max_acceleration_mps2: 2.0
+  max_yaw_rate_deg_s: 30.0
+  target_warning_age_s: 0.5
+  target_abort_age_s: 2.0
+  vehicle_heartbeat_timeout_s: 2.0
+  command_ack_timeout_s: 1.0
+  mission_timeout_s: 600.0
+  min_battery_remaining_pct: 35.0
+  return_battery_remaining_pct: 45.0
+
+logging:
+  level: "INFO"
+  directory: "./logs"
+  telemetry_csv: true
+  event_jsonl: true
+
+rates:
+  vehicle_receive_hz: 20.0
+  target_receive_hz: 10.0
+  estimator_hz: 20.0
+  guidance_hz: 10.0
+  safety_hz: 20.0
+  status_hz: 2.0
+

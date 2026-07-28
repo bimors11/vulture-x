@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vulture-x"
+version = "0.1.0"
+description = "Safety-oriented cooperative UAV stand-off research software"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Vulture-X contributors" }]
+dependencies = [
+    "pydantic>=2.7,<3",
+    "PyYAML>=6.0,<7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.10",
+    "pytest>=8.2",
+    "pytest-cov>=5.0",
+    "ruff>=0.5",
+    "types-PyYAML>=6.0",
+]
+
+[project.scripts]
+vulture-x = "vulture_x.main:cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+extend-exclude = [".runtime-python", ".docker-config"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["vulture_x"]
+mypy_path = "src"
