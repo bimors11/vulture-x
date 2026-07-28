@@ -34,11 +34,12 @@ Tools/autotest/sim_vehicle.py \
 Inspect the current official instructions and installer before executing them.
 Do not force the Ubuntu prerequisite script on an unsupported Mint base.
 
-The Vulture-X SITL configuration listens at `udpin:0.0.0.0:14550`. Record exact
-ports because MAVProxy/SITL options can change them.
+The Vulture-X SITL configuration listens at `udpin:0.0.0.0:14550` and also
+exports `udp:127.0.0.1:14551` for QGroundControl. In QGroundControl, add a UDP
+comm link that listens on port `14551` if auto-detection does not connect.
+Record exact ports because MAVProxy/SITL options can change them.
 
 The current Vulture-X milestone cannot connect to this endpoint. The next Codex
 agent must first implement and mock-test heartbeat, identity validation,
 telemetry, ACK correlation, timeouts, and clean shutdown. Its first real SITL
 connection must be read-only.
-
