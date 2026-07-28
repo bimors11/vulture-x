@@ -2,46 +2,44 @@
 
 These instructions apply to the entire Vulture-X repository.
 
-## Start here
+## Authority and current boundary
 
-Read, in order:
+`PROJECT_SPEC.md` is the current authoritative prompt. Read it, this file,
+`README.md`, `docs/architecture.md`, `docs/safety.md`, and
+`docs/sitl_setup.md` before changing code.
 
-1. `PROJECT_SPEC.md`
-2. `README.md`
-3. `docs/safety_case.md`
-4. `docs/LINUX_MINT_SITL_HANDOFF.md`
-5. `docs/test_plan.md`
+This repository implements the first milestone only. It has synthetic video,
+OpenCV tracking, bounded image guidance, safety policies, a mock vehicle, and
+mission state transitions through `TRACK`. It has no functioning SITL or
+hardware MAVLink client. Do not claim otherwise.
 
-The repository currently implements only Milestone 0 / Task 1. Configuration,
-shared data models, structured logging, a safe CLI bootstrap, and unit tests
-exist. MAVLink connectivity, vehicle commands, target ingestion, guidance,
-mission supervision, and SITL integration do not yet exist.
+## Product rules
 
-## Development rules
+- Keep the product/repository name `vulture-x` and Python package `vulture_x`.
+- The ground laptop performs vision and high-level guidance; there is no
+  onboard companion computer in the planned architecture.
+- Use ArduPilot `GUIDED`, never PX4 `OFFBOARD` assumptions.
+- Keep MAVLink transport independent of guidance, tracking, and mission code.
+- Keep video sources independent of tracking code.
+- Use Python 3.11+, asyncio, bounded queues, strict types, YAML configuration,
+  monotonic timing, and structured logs.
+- Never auto-arm. Any future arm path requires an explicit CLI enable flag and
+  verified FCU identity, health, mode, and operator intent.
+- Commands must be bounded and expire. Expired commands must never be sent.
+- Tracking loss must zero pursuit, then cause HOLD, then ABORT according to
+  configured monotonic timeouts.
+- Safety decisions override guidance and mission decisions.
+- Incomplete safety-critical functions must raise clearly or remain absent;
+  never add a hidden successful fallback.
+- Do not add collision/contact, terminal attack, RF interference, spoofing,
+  jamming, payload deployment, or real-aircraft engagement behavior.
+- Maintain configurable minimum separation. Image size alone is not verified
+  physical range; real separation enforcement remains incomplete until a
+  validated range source exists.
 
-- Keep the product name `Vulture-X`, distribution/repository name `vulture-x`,
-  Python package name `vulture_x`, and target protocol name
-  `vulture-target-v1`.
-- Implement the tasks in section 26 of `PROJECT_SPEC.md` in order.
-- Complete one milestone at a time. Do not skip directly to flight behavior.
-- Preserve ArduPilot flight-control authority and internal failsafes.
-- Never arm automatically at process startup.
-- Require explicit operator enable before any future arm or takeoff path.
-- Never transmit movement setpoints until FCU identity, mode, health, position,
-  home, target freshness/frame, and safety guards are validated.
-- Every transmitted command must have ACK or telemetry confirmation, a bounded
-  retry policy, an expiry/timeout, and structured logs.
-- Use monotonic time for freshness, timeout, and command-expiration decisions.
-- Reject stale, malformed, unsupported-frame, or low-confidence target data.
-- Safety decisions override mission and guidance decisions.
-- Do not add collision/contact, jamming, spoofing, denial-of-service,
-  weaponization, or non-cooperative-aircraft control behavior.
-- Incomplete safety-critical functions must raise `NotImplementedError`; they
-  must never silently succeed.
+## Required checks
 
-## Required checks for every change
-
-From an activated Python 3.11+ virtual environment:
+Use an isolated Python environment:
 
 ```bash
 python -m pip install -e ".[dev]"
@@ -51,17 +49,26 @@ mypy
 vulture-x --config configs/default.yaml --check-config
 ```
 
-Add or update tests and documentation with every implementation change. Report
-the commands run, results, assumptions, and unresolved safety risks.
+Every change needs tests, documentation, machine-readable failure reasons, and
+a report of assumptions and incomplete components.
 
-## SITL gate
+## Next implementation order
 
-Use ArduPilot Copter SITL only after the existing checks pass. Keep ArduPilot in
-a separate checkout; do not vendor it into this repository. Follow
-`docs/LINUX_MINT_SITL_HANDOFF.md`, verify Linux Mint/Ubuntu-base compatibility,
-and remain in SITL until all mandatory simulated failure cases for the active
-milestone pass.
+1. Add an asynchronous `pymavlink` UDP transport/client with mocked heartbeat,
+   identity, telemetry cache, ACK correlation, timeout, and clean-shutdown
+   tests.
+2. Connect read-only to Copter SITL and record exact ArduPilot commit, launch
+   command, ports, and logs.
+3. Add command encoding tests without sending commands.
+4. Add explicit operator-enable CLI gating.
+5. Exercise mode/arm/takeoff only in SITL after all guards and ACK handling
+   pass.
+6. Integrate synthetic tracking and bounded guidance with SITL.
+7. Automate target-loss HOLD and ABORT/LOITER-or-RTL evidence.
+8. Implement video-file and V4L2 sources only after the synthetic path is
+   stable.
+9. Add ELRS only after transport-independent SITL behavior is proven.
 
-Do not interpret successful unit tests or a successful SITL build as approval
-for HIL, propulsion-connected testing, or outdoor flight.
+Do not connect propulsion, perform HIL, or attempt outdoor flight under these
+instructions.
 

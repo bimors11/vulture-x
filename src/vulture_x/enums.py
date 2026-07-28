@@ -1,4 +1,4 @@
-"""Shared enumerations for mission and safety behavior."""
+"""Shared mission, safety, and command enumerations."""
 
 from enum import StrEnum, auto
 
@@ -7,14 +7,13 @@ class MissionState(StrEnum):
     BOOT = auto()
     SELF_TEST = auto()
     WAIT_FCU = auto()
-    WAIT_HOME = auto()
     READY = auto()
-    ARMED_STANDBY = auto()
+    ARMED = auto()
     TAKEOFF = auto()
-    OBSERVE = auto()
+    SEARCH = auto()
     TRACK = auto()
-    APPROACH = auto()
-    STANDOFF = auto()
+    GUIDANCE = auto()
+    HOLD = auto()
     RETURN = auto()
     LAND = auto()
     ABORT = auto()
@@ -24,25 +23,24 @@ class MissionState(StrEnum):
 class SafetyStatus(StrEnum):
     NORMAL = auto()
     WARNING = auto()
-    RETURN_REQUIRED = auto()
+    HOLD_REQUIRED = auto()
     ABORT_REQUIRED = auto()
 
 
 class SafetyReason(StrEnum):
     NONE = auto()
-    FCU_HEARTBEAT_TIMEOUT = auto()
-    TARGET_DATA_STALE = auto()
-    TARGET_FRAME_INVALID = auto()
-    VEHICLE_EKF_UNHEALTHY = auto()
-    VEHICLE_POSITION_INVALID = auto()
-    GEOFENCE_VIOLATION = auto()
-    SEPARATION_VIOLATION = auto()
-    BATTERY_LOW = auto()
+    TARGET_NOT_DETECTED = auto()
+    TRACKING_CONFIDENCE_LOW = auto()
+    TRACKING_TIMEOUT = auto()
+    MAVLINK_HEARTBEAT_TIMEOUT = auto()
+    VEHICLE_NAVIGATION_UNHEALTHY = auto()
+    COMMAND_EXPIRED = auto()
+    COMMAND_LIMIT_EXCEEDED = auto()
+    MINIMUM_SEPARATION_VIOLATION = auto()
+    FCU_IDENTITY_INVALID = auto()
     COMMAND_ACK_FAILED = auto()
-    INTERNAL_ERROR = auto()
     OPERATOR_ABORT = auto()
-    GUIDANCE_LIMIT_EXCEEDED = auto()
-    ESTIMATOR_UNCERTAIN = auto()
+    INTERNAL_ERROR = auto()
 
 
 class LimiterDecision(StrEnum):

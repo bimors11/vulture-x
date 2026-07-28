@@ -1,4 +1,4 @@
-"""Strict YAML configuration loading and safety validation."""
+"""Strict YAML configuration loading and cross-field safety validation."""
 
 from pathlib import Path
 from typing import Literal
@@ -13,7 +13,7 @@ class StrictModel(BaseModel):
 
 class ProjectConfig(StrictModel):
     name: Literal["vulture-x"] = "vulture-x"
-    environment: Literal["sitl", "hil", "flight_test"] = "sitl"
+    environment: Literal["development", "sitl", "hil", "flight_test"] = "development"
 
 
 class VehicleConfig(StrictModel):
@@ -23,8 +23,9 @@ class VehicleConfig(StrictModel):
     expected_autopilot: Literal["ARDUPILOTMEGA"] = "ARDUPILOTMEGA"
     expected_vehicle_type: Literal["QUADROTOR"] = "QUADROTOR"
     guided_mode: Literal["GUIDED"] = "GUIDED"
-    recovery_mode: Literal["RTL", "LAND", "LOITER"] = "RTL"
-    heartbeat_hz_min: float = Field(default=0.5, gt=0)
+    hold_mode: Literal["LOITER"] = "LOITER"
+    recovery_mode: Literal["RTL", "LAND"] = "RTL"
+    takeoff_altitude_m: float = Field(default=10.0, gt=0, le=120)
 
     @model_validator(mode="after")
     def validate_connection(self) -> "VehicleConfig":
@@ -32,14 +33,12 @@ class VehicleConfig(StrictModel):
         valid = False
         if len(parts) == 3 and parts[0] in {"udpin", "udpout"}:
             try:
-                port = int(parts[2])
-                valid = bool(parts[1]) and 1 <= port <= 65535
+                valid = bool(parts[1]) and 1 <= int(parts[2]) <= 65535
             except ValueError:
                 valid = False
         elif len(parts) == 3 and parts[0] == "serial":
             try:
-                baud = int(parts[2])
-                valid = bool(parts[1]) and baud > 0
+                valid = bool(parts[1]) and int(parts[2]) > 0
             except ValueError:
                 valid = False
         if not valid:
@@ -50,86 +49,86 @@ class VehicleConfig(StrictModel):
         return self
 
 
-class TargetConfig(StrictModel):
-    source: Literal["cooperative_udp"] = "cooperative_udp"
-    listen_host: str = "0.0.0.0"
-    listen_port: int = Field(default=15550, ge=1, le=65535)
-    expected_frame: Literal["WGS84_MSL"] = "WGS84_MSL"
-    minimum_confidence: float = Field(default=0.8, ge=0, le=1)
-    allowed_source_ids: tuple[str, ...] = ()
-
-
-class GuidanceConfig(StrictModel):
-    type: Literal["fixed_standoff", "pure_pursuit", "lead_pursuit"] = "lead_pursuit"
-    update_rate_hz: float = Field(default=10.0, gt=0)
-    preferred_standoff_m: float = Field(default=50.0, gt=0)
-    lookahead_time_s: float = Field(default=2.0, gt=0)
-    lookahead_time_min_s: float = Field(default=0.5, gt=0)
-    lookahead_time_max_s: float = Field(default=5.0, gt=0)
+class VisionConfig(StrictModel):
+    source: Literal["synthetic"] = "synthetic"
+    width: int = Field(default=640, ge=64, le=7680)
+    height: int = Field(default=480, ge=64, le=4320)
+    fps: float = Field(default=30.0, gt=0, le=240)
+    tracker: Literal["CSRT", "KCF"] = "CSRT"
+    show_window: bool = False
+    random_seed: int = 42
+    target_shape: Literal["rectangle", "circle"] = "rectangle"
+    target_width_px: int = Field(default=72, gt=2)
+    target_height_px: int = Field(default=54, gt=2)
+    target_speed_x_px_s: float = 90.0
+    target_speed_y_px_s: float = 45.0
+    background_bgr: tuple[int, int, int] = (24, 24, 24)
+    target_bgr: tuple[int, int, int] = (40, 220, 255)
+    noise_stddev: float = Field(default=0.0, ge=0, le=100)
+    disappear_after_frame: int | None = Field(default=None, ge=0)
+    disappear_duration_frames: int = Field(default=0, ge=0)
+    sudden_move_frame: int | None = Field(default=None, ge=0)
+    frame_delay_s: float = Field(default=0.0, ge=0, le=5)
 
     @model_validator(mode="after")
-    def validate_lookahead(self) -> "GuidanceConfig":
-        if not self.lookahead_time_min_s <= self.lookahead_time_s <= self.lookahead_time_max_s:
-            raise ValueError("lookahead_time_s must be within its configured min/max range")
+    def validate_target_geometry(self) -> "VisionConfig":
+        if self.target_width_px >= self.width or self.target_height_px >= self.height:
+            raise ValueError("synthetic target dimensions must be smaller than the video frame")
+        for color in (*self.background_bgr, *self.target_bgr):
+            if not 0 <= color <= 255:
+                raise ValueError("BGR color channels must be in [0, 255]")
         return self
 
 
+class GuidanceConfig(StrictModel):
+    update_rate_hz: float = Field(default=10.0, gt=0)
+    max_forward_speed_mps: float = Field(default=5.0, gt=0)
+    max_lateral_speed_mps: float = Field(default=3.0, gt=0)
+    max_vertical_speed_mps: float = Field(default=2.0, gt=0)
+    max_acceleration_mps2: float = Field(default=1.5, gt=0)
+    max_yaw_rate_deg_s: float = Field(default=30.0, gt=0, le=90)
+    horizontal_deadband: float = Field(default=0.05, ge=0, lt=1)
+    vertical_deadband: float = Field(default=0.05, ge=0, lt=1)
+    target_size_setpoint: float = Field(default=0.12, gt=0, lt=1)
+
+
 class SafetyConfig(StrictModel):
-    min_horizontal_separation_m: float = Field(default=30.0, gt=0)
-    min_vertical_separation_m: float = Field(default=15.0, gt=0)
-    max_closure_rate_mps: float = Field(default=5.0, gt=0)
-    max_groundspeed_mps: float = Field(default=15.0, gt=0)
-    max_vertical_speed_mps: float = Field(default=3.0, gt=0)
-    max_acceleration_mps2: float = Field(default=2.0, gt=0)
-    max_yaw_rate_deg_s: float = Field(default=30.0, gt=0)
-    target_warning_age_s: float = Field(default=0.5, ge=0)
-    target_abort_age_s: float = Field(default=2.0, gt=0)
-    vehicle_heartbeat_timeout_s: float = Field(default=2.0, gt=0)
-    command_ack_timeout_s: float = Field(default=1.0, gt=0)
-    mission_timeout_s: float = Field(default=600.0, gt=0)
-    min_battery_remaining_pct: float = Field(default=35.0, ge=0, le=100)
-    return_battery_remaining_pct: float = Field(default=45.0, ge=0, le=100)
+    minimum_tracking_confidence: float = Field(default=0.6, ge=0, le=1)
+    tracking_warning_timeout_s: float = Field(default=0.3, ge=0)
+    tracking_abort_timeout_s: float = Field(default=1.0, gt=0)
+    mavlink_heartbeat_timeout_s: float = Field(default=2.0, gt=0)
+    command_expiration_s: float = Field(default=0.25, gt=0)
+    minimum_separation_m: float = Field(default=10.0, gt=0)
+    maximum_test_speed_mps: float = Field(default=5.0, gt=0)
 
     @model_validator(mode="after")
-    def validate_threshold_order(self) -> "SafetyConfig":
-        if self.target_warning_age_s > self.target_abort_age_s:
-            raise ValueError("target warning age must not exceed target abort age")
-        if self.return_battery_remaining_pct < self.min_battery_remaining_pct:
-            raise ValueError("return battery threshold must not be below minimum battery threshold")
+    def validate_timeout_order(self) -> "SafetyConfig":
+        if self.tracking_warning_timeout_s >= self.tracking_abort_timeout_s:
+            raise ValueError("tracking warning timeout must be below tracking abort timeout")
+        if self.command_expiration_s >= self.mavlink_heartbeat_timeout_s:
+            raise ValueError("command expiration must be below MAVLink heartbeat timeout")
         return self
 
 
 class LoggingConfig(StrictModel):
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     directory: Path = Path("./logs")
-    telemetry_csv: bool = True
     event_jsonl: bool = True
-
-
-class RatesConfig(StrictModel):
-    vehicle_receive_hz: float = Field(default=20.0, gt=0)
-    target_receive_hz: float = Field(default=10.0, gt=0)
-    estimator_hz: float = Field(default=20.0, gt=0)
-    guidance_hz: float = Field(default=10.0, gt=0)
-    safety_hz: float = Field(default=20.0, gt=0)
-    status_hz: float = Field(default=2.0, gt=0)
+    telemetry_csv: bool = True
 
 
 class AppConfig(StrictModel):
     project: ProjectConfig
     vehicle: VehicleConfig
-    target: TargetConfig
+    vision: VisionConfig
     guidance: GuidanceConfig
     safety: SafetyConfig
     logging: LoggingConfig = LoggingConfig()
-    rates: RatesConfig = RatesConfig()
 
     @model_validator(mode="after")
-    def validate_safety_geometry(self) -> "AppConfig":
-        if self.safety.min_horizontal_separation_m > self.guidance.preferred_standoff_m:
-            raise ValueError(
-                "minimum horizontal separation must not exceed preferred stand-off distance"
-            )
+    def validate_command_envelope(self) -> "AppConfig":
+        if self.safety.maximum_test_speed_mps > self.guidance.max_forward_speed_mps:
+            raise ValueError("maximum test speed must not exceed maximum forward speed")
         return self
 
 
@@ -144,4 +143,3 @@ def load_config(path: Path) -> AppConfig:
     if not isinstance(raw, dict):
         raise ValueError(f"configuration {path} must contain a YAML mapping")
     return AppConfig.model_validate(raw)
-

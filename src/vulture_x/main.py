@@ -50,10 +50,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "version": __version__,
             "environment": config.project.environment,
             "command_authority": "disabled",
+            "vehicle_interface": "mock_only",
+            "vision_source": config.vision.source,
         },
     )
     logger.info(
-        "Foundation initialized; vehicle connectivity and command authority are not implemented."
+        "Vision milestone initialized; SITL connectivity and command authority are not implemented."
     )
     return 0
 

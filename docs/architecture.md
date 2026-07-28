@@ -1,19 +1,22 @@
 # Architecture
 
-Vulture-X uses a single asynchronous application boundary around separately
-testable vehicle, target, estimator, safety, guidance, mission, and logging
-modules. ArduPilot retains stabilization and flight-control authority.
-
-Milestone 0 implements only configuration, shared types, logging, and process
-bootstrap. Vehicle I/O and command authority are deliberately absent.
-
-Future control outputs must flow through this ordering:
+Vulture-X processes simulated or captured analog video on a Linux ground
+station. Tracking outputs normalized image error and apparent target size.
+Guidance converts those signals into short-lived body-frame velocity and
+yaw-rate requests. Every request passes through safety and limiter layers before
+a transport-independent MAVLink boundary.
 
 ```text
-target validation -> estimation -> guidance -> limiter chain
-                  -> safety supervisor -> vehicle interface
+VideoSource -> OpenCV tracker -> TrackingResult -> tracking safety
+            -> image guidance -> command limiters -> command safety
+            -> mission supervisor -> MAVLink vehicle boundary -> ArduPilot
 ```
 
-The safety supervisor can reject guidance and request recovery. No downstream
-component may override that decision.
+The first milestone ends at a mock vehicle boundary. The mock records commands
+for tests but never opens UDP or serial connections.
+
+The future physical video path is analog camera/VTX, ground receiver, and USB
+capture. The future control link may be SITL UDP, serial telemetry, or ELRS.
+Neither tracking nor guidance may depend on which concrete source or transport
+is selected.
 

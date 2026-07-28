@@ -1,6 +1,6 @@
 project:
   name: "vulture-x"
-  environment: "development"
+  environment: "sitl"
 
 vehicle:
   connection: "udpin:0.0.0.0:14550"
@@ -19,7 +19,7 @@ vision:
   height: 480
   fps: 30.0
   tracker: "CSRT"
-  show_window: false
+  show_window: true
   random_seed: 42
   target_shape: "rectangle"
   target_width_px: 72
@@ -29,9 +29,9 @@ vision:
   background_bgr: [24, 24, 24]
   target_bgr: [40, 220, 255]
   noise_stddev: 0.0
-  disappear_after_frame: null
-  disappear_duration_frames: 0
-  sudden_move_frame: null
+  disappear_after_frame: 240
+  disappear_duration_frames: 45
+  sudden_move_frame: 420
   frame_delay_s: 0.0
 
 guidance:

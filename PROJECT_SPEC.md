@@ -1,143 +1,125 @@
-﻿# Vulture-X
+You are developing a new repository named `vulture-x`.
 
-## Engineering Specification and Development Baseline
+The project is a ground-based visual tracking and UAV guidance research system. It must be tested first using ArduPilot SITL before any real hardware integration.
 
-**Document status:** Initial development baseline  
-**Intended use:** Cooperative, non-contact UAV interception research, simulation, HIL testing, and controlled flight testing  
-**Primary autopilot:** ArduPilot  
-**Companion environment:** Linux, Python 3.11+, optional ROS 2  
-**Primary transport:** MAVLink 2 over UDP or serial  
-**Repository type:** Safety-oriented research software
+## System Architecture
 
----
-
-## 1. Project Objective
-
-Vulture-X is a modular software stack for a cooperative UAV interceptor that:
-
-1. Connects to an ArduPilot vehicle through MAVLink.
-2. Receives target state from an authorized cooperative source.
-3. Estimates relative target motion.
-4. Generates constrained approach commands.
-5. Maintains a configurable stand-off distance.
-6. Aborts safely when target confidence, vehicle health, link quality, or geofence conditions become invalid.
-7. Supports Software-in-the-Loop, Hardware-in-the-Loop, and controlled outdoor testing.
-
-This project shall not implement collision, kinetic engagement, unauthorized radio interference, GNSS spoofing, denial-of-service, or autonomous harmful action.
-
-The initial product definition is:
-
-> An autonomous chase-and-stand-off demonstrator for cooperative targets.
-
----
-
-## 2. Scope
-
-### 2.1 In scope
-
-- ArduPilot SITL integration.
-- MAVLink vehicle connection.
-- Vehicle health monitoring.
-- Cooperative target telemetry ingestion.
-- Relative-state estimation.
-- Position and velocity guidance.
-- Stand-off orbit or trailing behavior.
-- State-machine-based mission supervision.
-- Geofence and separation enforcement.
-- Link-loss and stale-data handling.
-- Logging and replay.
-- Deterministic simulation scenarios.
-- Unit, integration, SITL, and HIL tests.
-- Optional ROS 2 adapters.
-
-### 2.2 Out of scope
-
-- RF spoofing.
-- RF jamming.
-- GNSS manipulation.
-- Unauthorized target exploitation.
-- Physical collision.
-- Payload release.
-- Weaponization.
-- Facial recognition.
-- Autonomous identification of persons.
-- Control of non-cooperative aircraft.
-- Operation outside segregated test areas.
-
----
-
-## 3. Design Principles
-
-The system shall follow these principles:
-
-1. **ArduPilot retains flight-control authority.**  
-   The companion computer sends only high-level setpoints. Stabilization, EKF, actuator control, and core failsafes remain in the autopilot.
-
-2. **Safety constraints override mission objectives.**  
-   Separation, geofence, battery reserve, data age, and vehicle health have higher priority than interception.
-
-3. **All mission behavior is state-machine controlled.**  
-   Commands shall not be issued through unstructured callback logic.
-
-4. **No command is trusted without feedback.**  
-   Mode changes, arming, takeoff, and mission commands must be verified through telemetry or `COMMAND_ACK`.
-
-5. **Target data must be time-valid and frame-valid.**  
-   Stale, unframed, or low-confidence target data shall not drive the vehicle.
-
-6. **Simulation precedes flight.**  
-   Every behavior must pass unit tests and SITL scenarios before HIL or outdoor testing.
-
-7. **The system must fail predictably.**  
-   Loss of companion, loss of target, bad GPS, bad EKF, or link degradation must result in a defined safe state.
-
----
-
-## 4. Top-Level Architecture
+The final physical architecture will be:
 
 ```text
-┌─────────────────────────────────────────────────────────────┐
-│                     Mission Supervisor                      │
-│ state machine, guards, abort logic, operator authority      │
-├───────────────────────────────┬─────────────────────────────┤
-│ Target Ingestion              │ Vehicle Interface           │
-│ cooperative target telemetry  │ MAVLink connection          │
-│ timestamp/frame validation    │ health, modes, ACK handling  │
-├───────────────────────────────┼─────────────────────────────┤
-│ Target Estimator              │ Safety Supervisor           │
-│ filtering and prediction      │ geofence, separation, limits │
-├───────────────────────────────┼─────────────────────────────┤
-│ Guidance Manager              │ Logging and Replay          │
-│ pursuit, lead, orbit, trail   │ events, telemetry, commands  │
-├───────────────────────────────┴─────────────────────────────┤
-│                 ArduPilot SITL or Real Autopilot            │
-└─────────────────────────────────────────────────────────────┘
+Drone:
+- 5-inch to 7-inch FPV quadcopter
+- ArduPilot-compatible flight controller
+- GPS
+- ELRS receiver
+- Analog FPV camera
+- Analog VTX
+- No onboard companion computer
+
+Ground:
+- Analog video receiver
+- USB analog video capture device
+- Linux laptop
+- OpenCV tracking application
+- MAVLink guidance application
+- ELRS transmitter module
 ```
 
----
+Data flow:
 
-## 5. Recommended Repository Structure
+```text
+Analog camera
+    ↓
+Analog VTX
+    ↓
+Ground video receiver
+    ↓
+USB video capture
+    ↓
+OpenCV target tracker
+    ↓
+Guidance controller
+    ↓
+MAVLink velocity setpoints
+    ↓
+ELRS MAVLink link
+    ↓
+ArduPilot GUIDED mode
+```
+
+For the first development phase, replace the real camera, VTX, video receiver, and ELRS link with simulation interfaces.
+
+The initial system shall run entirely with:
+
+* ArduPilot Copter SITL
+* Python 3.11 or newer
+* pymavlink
+* OpenCV
+* asyncio
+* YAML configuration
+* pytest
+* ruff
+* mypy
+
+Do not use ROS.
+
+## Safety Boundary
+
+The software is intended for controlled visual tracking and non-contact flight testing.
+
+Do not implement:
+
+* intentional collision
+* impact guidance
+* terminal attack logic
+* RF interference
+* spoofing
+* jamming
+* payload deployment
+* autonomous engagement of real aircraft
+
+The interceptor must maintain a configurable minimum separation distance during simulation and flight testing.
+
+## First Development Objective
+
+Create a working SITL prototype where:
+
+1. ArduPilot Copter SITL represents the interceptor drone.
+2. A simulated video source represents the analog camera feed.
+3. A visible synthetic target moves across the video frame.
+4. OpenCV tracks the target.
+5. The tracker outputs:
+
+   * normalized horizontal image error
+   * normalized vertical image error
+   * target bounding-box size
+   * tracking confidence
+   * target lost status
+6. A guidance controller converts image tracking error into limited navigation commands.
+7. Navigation commands are sent to ArduPilot SITL using MAVLink in `GUIDED` mode.
+8. The system enters a safe state when:
+
+   * the target is lost
+   * tracking confidence is too low
+   * MAVLink communication is lost
+   * SITL reports unhealthy navigation
+   * command limits are exceeded
+9. All telemetry, tracking outputs, guidance commands, and state transitions are logged.
+10. The complete simulation can be launched with one command.
+
+## Repository Structure
+
+Create this structure:
 
 ```text
 vulture-x/
 ├── README.md
 ├── PROJECT_SPEC.md
-├── LICENSE
 ├── pyproject.toml
-├── .env.example
 ├── .gitignore
 ├── configs/
 │   ├── default.yaml
-│   ├── sitl.yaml
-│   ├── hil.yaml
-│   └── flight_test.yaml
-├── docs/
-│   ├── architecture.md
-│   ├── safety_case.md
-│   ├── mavlink_interface.md
-│   ├── coordinate_frames.md
-│   ├── test_plan.md
-│   └── flight_test_cards.md
+│   └── sitl.yaml
 ├── src/
 │   └── vulture_x/
 │       ├── __init__.py
@@ -145,111 +127,51 @@ vulture-x/
 │       ├── config.py
 │       ├── models.py
 │       ├── enums.py
-│       ├── clock.py
-│       ├── mission/
-│       │   ├── supervisor.py
-│       │   ├── state_machine.py
-│       │   ├── guards.py
-│       │   └── transitions.py
 │       ├── vehicle/
 │       │   ├── mavlink_client.py
 │       │   ├── telemetry.py
 │       │   ├── commands.py
-│       │   ├── health.py
-│       │   └── mode_manager.py
-│       ├── target/
-│       │   ├── source.py
-│       │   ├── cooperative_udp.py
-│       │   ├── mavlink_target.py
-│       │   ├── validator.py
-│       │   └── estimator.py
+│       │   └── health.py
+│       ├── vision/
+│       │   ├── video_source.py
+│       │   ├── synthetic_video.py
+│       │   ├── tracker.py
+│       │   └── target_state.py
 │       ├── guidance/
-│       │   ├── manager.py
-│       │   ├── pursuit.py
-│       │   ├── lead.py
-│       │   ├── trail.py
-│       │   ├── standoff.py
+│       │   ├── controller.py
+│       │   ├── image_guidance.py
 │       │   └── limiters.py
+│       ├── mission/
+│       │   ├── supervisor.py
+│       │   ├── state_machine.py
+│       │   └── guards.py
 │       ├── safety/
 │       │   ├── supervisor.py
-│       │   ├── geofence.py
-│       │   ├── separation.py
-│       │   ├── data_freshness.py
+│       │   ├── tracking_safety.py
+│       │   ├── command_safety.py
 │       │   └── abort_policy.py
-│       ├── logging/
-│       │   ├── event_logger.py
-│       │   ├── telemetry_logger.py
-│       │   └── replay.py
-│       └── api/
-│           ├── status_server.py
-│           └── schemas.py
+│       └── logging/
+│           ├── event_logger.py
+│           └── telemetry_logger.py
 ├── tests/
 │   ├── unit/
 │   ├── integration/
-│   ├── sitl/
-│   └── replay/
+│   └── sitl/
 ├── scripts/
+│   ├── install_ardupilot_sitl.sh
 │   ├── run_sitl.sh
-│   ├── run_vulture.sh
-│   ├── run_target_sim.sh
-│   └── analyze_logs.py
-├── docker/
-│   ├── Dockerfile
-│   └── compose.yaml
-└── .github/
-    └── workflows/
-        ├── test.yaml
-        └── lint.yaml
+│   ├── run_vulture_x.sh
+│   └── run_demo.sh
+└── docs/
+    ├── architecture.md
+    ├── sitl_setup.md
+    ├── tracking.md
+    └── safety.md
 ```
 
----
+## Mission State Machine
 
-## 6. Operating Modes
-
-The initial implementation shall support:
-
-### 6.1 Observe
-
-The system receives target and vehicle telemetry but sends no movement commands.
-
-Use this mode for:
-
-- telemetry validation;
-- timestamp validation;
-- frame validation;
-- estimator testing;
-- dry-run logging.
-
-### 6.2 Follow
-
-The interceptor follows the cooperative target while preserving:
-
-- minimum horizontal separation;
-- minimum vertical separation;
-- maximum closure rate;
-- maximum speed;
-- maximum acceleration;
-- geofence constraints.
-
-### 6.3 Stand-off
-
-The interceptor approaches until the configured stand-off radius is reached, then:
-
-- holds position;
-- trails the target;
-- or orbits around a predicted target position.
-
-### 6.4 Return
-
-The mission supervisor commands RTL or another configured recovery behavior.
-
-### 6.5 Abort
-
-Abort is a high-priority state entered when any critical safety condition is violated.
-
----
-
-## 7. Mission State Machine
+Implement:
 
 ```text
 BOOT
@@ -258,568 +180,355 @@ SELF_TEST
   ↓
 WAIT_FCU
   ↓
-WAIT_HOME
-  ↓
 READY
   ↓
-ARMED_STANDBY
+ARMED
   ↓
 TAKEOFF
   ↓
-OBSERVE
+SEARCH
   ↓
 TRACK
   ↓
-APPROACH
+GUIDANCE
   ↓
-STANDOFF
+HOLD
   ↓
 RETURN
   ↓
 LAND
-  ↓
-COMPLETE
 
 Any active state
-  └──────────────→ ABORT
+  ↓
+ABORT
 ```
 
-### 7.1 State definitions
+State behavior:
 
-#### BOOT
+### SEARCH
 
-Actions:
+* Display the video feed.
+* Search for a target.
+* Do not send pursuit commands.
+* Allow manual target selection.
 
-- load configuration;
-- initialize logging;
-- initialize event bus;
-- validate software version.
+### TRACK
 
-Exit criteria:
+* Run the selected OpenCV tracker.
+* Calculate image-plane errors.
+* Validate confidence.
+* Do not send unrestricted commands.
 
-- configuration valid;
-- required modules initialized.
+### GUIDANCE
 
-#### SELF_TEST
+* Convert image error into limited MAVLink navigation setpoints.
+* Continuously validate tracking confidence.
+* Apply speed, acceleration, and yaw-rate limits.
+* Abort when target data becomes invalid.
 
-Actions:
+### HOLD
 
-- check configuration ranges;
-- check coordinate-frame settings;
-- check local clock;
-- check target-source configuration;
-- verify command limiter initialization.
+* Stop pursuit commands.
+* Command zero horizontal velocity or switch to `LOITER`.
+* Wait for target reacquisition or operator instruction.
 
-Exit criteria:
+### RETURN
 
-- no critical self-test failures.
+* Command ArduPilot `RTL`.
+* Stop sending tracking guidance.
 
-#### WAIT_FCU
+### ABORT
 
-Actions:
+* Stop all guidance commands.
+* Command `LOITER` or `RTL`.
+* Log the abort reason.
+* Require explicit operator reset.
 
-- connect to MAVLink endpoint;
-- wait for heartbeat;
-- identify autopilot and vehicle type;
-- confirm MAVLink protocol version.
+## Tracking Interface
 
-Exit criteria:
-
-- valid FCU heartbeat received;
-- system ID and component ID validated.
-
-#### WAIT_HOME
-
-Actions:
-
-- wait for global position;
-- wait for valid home position;
-- wait for EKF health.
-
-Exit criteria:
-
-- home position valid;
-- position estimate valid;
-- geofence reference established.
-
-#### READY
-
-Actions:
-
-- remain disarmed;
-- publish readiness status;
-- wait for operator enable.
-
-Exit criteria:
-
-- explicit operator authorization;
-- all pre-arm mission guards pass.
-
-#### ARMED_STANDBY
-
-Actions:
-
-- arm through verified command path;
-- confirm armed telemetry state.
-
-Exit criteria:
-
-- vehicle armed;
-- flight mode confirmed.
-
-#### TAKEOFF
-
-Actions:
-
-- command takeoff to configured altitude;
-- monitor ascent rate and altitude.
-
-Exit criteria:
-
-- altitude reached within tolerance;
-- vehicle health remains valid.
-
-#### OBSERVE
-
-Actions:
-
-- receive target state;
-- run target validation;
-- run estimator;
-- do not issue chase commands.
-
-Exit criteria:
-
-- target confidence above threshold;
-- operator enables tracking.
-
-#### TRACK
-
-Actions:
-
-- maintain target estimate;
-- assess intercept feasibility;
-- calculate safe approach corridor.
-
-Exit criteria:
-
-- valid guidance solution;
-- all safety constraints satisfied.
-
-#### APPROACH
-
-Actions:
-
-- generate constrained setpoints;
-- limit closure rate;
-- continuously evaluate abort guards.
-
-Exit criteria:
-
-- stand-off condition reached;
-- or mission timeout;
-- or safety violation.
-
-#### STANDOFF
-
-Actions:
-
-- maintain configured relative geometry;
-- optionally trail or orbit;
-- prevent entry into minimum separation volume.
-
-Exit criteria:
-
-- mission complete;
-- target lost;
-- return requested;
-- safety violation.
-
-#### RETURN
-
-Actions:
-
-- stop target pursuit;
-- command configured recovery mode.
-
-Exit criteria:
-
-- recovery mode accepted;
-- landing sequence begins.
-
-#### LAND
-
-Actions:
-
-- supervise landing telemetry;
-- stop companion guidance commands.
-
-Exit criteria:
-
-- vehicle disarmed.
-
-#### ABORT
-
-Actions:
-
-- stop all mission guidance;
-- command configured safe mode;
-- log the triggering condition;
-- require explicit reset before resuming.
-
----
-
-## 8. Safety Constraints
-
-The following parameters shall exist in configuration:
-
-```yaml
-safety:
-  min_horizontal_separation_m: 30.0
-  min_vertical_separation_m: 15.0
-  preferred_standoff_m: 50.0
-  max_closure_rate_mps: 5.0
-  max_groundspeed_mps: 15.0
-  max_vertical_speed_mps: 3.0
-  max_acceleration_mps2: 2.0
-  max_yaw_rate_deg_s: 30.0
-  target_warning_age_s: 0.5
-  target_abort_age_s: 2.0
-  vehicle_heartbeat_timeout_s: 2.0
-  command_ack_timeout_s: 1.0
-  mission_timeout_s: 600
-  min_battery_remaining_pct: 35
-  return_battery_remaining_pct: 45
-```
-
-### 8.1 Mandatory abort triggers
-
-The mission shall abort when any of the following occurs:
-
-- FCU heartbeat timeout.
-- Target data age exceeds abort threshold.
-- Target coordinate frame is unknown.
-- Vehicle EKF becomes unhealthy.
-- Vehicle position becomes invalid.
-- Geofence boundary is violated or predicted to be violated.
-- Horizontal or vertical separation falls below the hard minimum.
-- Battery falls below the configured return threshold.
-- Command acknowledgements repeatedly fail.
-- Companion process detects internal exception in a safety-critical module.
-- Operator activates manual abort.
-- Guidance output exceeds configured limits.
-- Target estimator covariance exceeds configured threshold.
-
-### 8.2 Command authority
-
-Priority order:
-
-1. RC pilot or independent safety pilot.
-2. Autopilot internal failsafe.
-3. Safety supervisor.
-4. Mission supervisor.
-5. Guidance manager.
-6. Operator mission request.
-
-The guidance manager shall never override a safety decision.
-
----
-
-## 9. Coordinate Frames
-
-The project shall use explicit frame definitions.
-
-### 9.1 Internal navigation frame
-
-Recommended internal frame:
-
-- local NED for guidance and relative motion;
-- WGS84 latitude, longitude, altitude for global telemetry;
-- monotonic timestamps for timing;
-- UTC timestamps only for logging and correlation.
-
-### 9.2 Required target fields
+Create this model:
 
 ```python
+from dataclasses import dataclass
+
+
 @dataclass(frozen=True)
-class TargetState:
-    source_id: str
+class TrackingResult:
     timestamp_monotonic_s: float
-    latitude_deg: float
-    longitude_deg: float
-    altitude_msl_m: float
-    velocity_n_mps: float
-    velocity_e_mps: float
-    velocity_d_mps: float
-    heading_deg: float | None
-    position_accuracy_m: float | None
-    velocity_accuracy_mps: float | None
+    detected: bool
     confidence: float
+    center_x_normalized: float
+    center_y_normalized: float
+    width_normalized: float
+    height_normalized: float
+    horizontal_error: float
+    vertical_error: float
 ```
 
-Every target state must carry:
-
-- source identifier;
-- valid timestamp;
-- coordinate frame;
-- position;
-- velocity when available;
-- confidence or accuracy estimate.
-
-Target messages without a timestamp or frame identifier shall be rejected.
-
----
-
-## 10. Vehicle Interface
-
-### 10.1 Connection
-
-Initial supported connection strings:
+Normalized image coordinates:
 
 ```text
-udpin:0.0.0.0:14550
-udpout:127.0.0.1:14551
-serial:/dev/ttyUSB0:57600
+horizontal_error:
+-1.0 = far left
+ 0.0 = image center
++1.0 = far right
+
+vertical_error:
+-1.0 = top
+ 0.0 = image center
++1.0 = bottom
 ```
 
-Connection configuration:
+## Synthetic Video Source
+
+Implement a synthetic video generator using OpenCV.
+
+Requirements:
+
+* configurable resolution
+* configurable frame rate
+* moving target rectangle or circle
+* configurable target speed
+* configurable target size
+* configurable background
+* optional noise
+* optional temporary target disappearance
+* optional sudden target movement
+* optional frame delay
+
+Default:
 
 ```yaml
-vehicle:
-  connection: "udpin:0.0.0.0:14550"
-  source_system: 191
-  source_component: 191
-  expected_autopilot: "ARDUPILOTMEGA"
-  expected_vehicle_type: "QUADROTOR"
-  heartbeat_hz_min: 0.5
+vision:
+  source: "synthetic"
+  width: 640
+  height: 480
+  fps: 30
+  tracker: "CSRT"
 ```
 
-### 10.2 MAVLink messages to consume
+The synthetic target must move through repeatable scenarios using a deterministic random seed.
 
-Minimum telemetry set:
+## Tracker
 
-- `HEARTBEAT`
-- `SYS_STATUS`
-- `BATTERY_STATUS`
-- `GLOBAL_POSITION_INT`
-- `LOCAL_POSITION_NED`
-- `ATTITUDE`
-- `VFR_HUD`
-- `EKF_STATUS_REPORT`
-- `GPS_RAW_INT`
-- `HOME_POSITION`
-- `EXTENDED_SYS_STATE`
-- `COMMAND_ACK`
-- `STATUSTEXT`
+Start with OpenCV CSRT or KCF.
 
-### 10.3 Commands
+The tracker must support:
 
-Initial command set:
+* manual initial target selection
+* synthetic automatic initialization
+* confidence estimation
+* target-lost detection
+* tracker reset
+* bounding-box validation
 
-- set mode;
-- arm;
-- disarm when safe;
-- takeoff;
-- land;
-- RTL;
-- guided position target;
-- guided velocity target.
+Do not add neural-network detection in the first milestone.
 
-Every command shall:
+## Guidance Strategy
 
-1. be assigned an internal command ID;
-2. record send timestamp;
-3. await telemetry confirmation or `COMMAND_ACK`;
-4. retry only according to explicit retry policy;
-5. log success or failure;
-6. fail closed after retry exhaustion.
+Use image-based guidance.
 
-### 10.4 ArduPilot mode policy
-
-Recommended modes:
-
-- `GUIDED` for companion-generated setpoints;
-- `LOITER` for temporary hold;
-- `RTL` for recovery;
-- `LAND` for immediate landing when appropriate.
-
-Do not use PX4-specific `OFFBOARD` assumptions in ArduPilot code.
-
----
-
-## 11. Target Estimation
-
-The first implementation shall use a constant-velocity estimator.
-
-State vector:
-
-\[
-x =
-\begin{bmatrix}
-p_N & p_E & p_D & v_N & v_E & v_D
-\end{bmatrix}^{T}
-\]
-
-The estimator shall provide:
-
-- filtered position;
-- filtered velocity;
-- prediction at configurable look-ahead time;
-- covariance or confidence;
-- data age;
-- source validity.
-
-### 11.1 Initial implementation stages
-
-#### Stage A: Pass-through estimator
-
-Use validated target telemetry directly.
-
-#### Stage B: Alpha-beta filter
-
-Use a lightweight filter for SITL and early tests.
-
-#### Stage C: Kalman filter
-
-Use a six-state constant-velocity model.
-
-#### Stage D: Multi-source fusion
-
-Optional later development for cooperative GNSS plus vision bearing.
-
-No advanced estimator should be added before deterministic test cases exist.
-
----
-
-## 12. Guidance
-
-### 12.1 Initial guidance laws
-
-Implement in this order:
-
-1. Position hold at a fixed stand-off waypoint.
-2. Pure pursuit with closure-rate limiting.
-3. Lead pursuit using target velocity prediction.
-4. Trailing-point guidance.
-5. Stand-off orbit.
-
-### 12.2 Pure pursuit
-
-The desired direction is based on the line from interceptor position to the predicted target position.
-
-The generated command must be constrained by:
-
-- maximum groundspeed;
-- maximum acceleration;
-- maximum closure rate;
-- geofence;
-- separation volume;
-- altitude corridor.
-
-### 12.3 Lead pursuit
-
-Predicted target position:
-
-\[
-p_{target,predicted} =
-p_{target} + v_{target} t_{lookahead}
-\]
-
-The look-ahead time shall be bounded:
-
-```yaml
-guidance:
-  lookahead_time_s: 2.0
-  lookahead_time_min_s: 0.5
-  lookahead_time_max_s: 5.0
-```
-
-### 12.4 Stand-off control
-
-Let:
-
-\[
-r = p_{target} - p_{interceptor}
-\]
-
-The controller shall reduce commanded approach speed as the range approaches the preferred stand-off radius.
-
-Example behavior:
+Initial mapping:
 
 ```text
-range > 2 × stand-off:
-    normal approach speed
+horizontal image error
+    ↓
+yaw-rate command or lateral velocity command
 
-stand-off < range ≤ 2 × stand-off:
-    progressively reduce closure rate
+vertical image error
+    ↓
+vertical velocity command
 
-minimum separation < range ≤ stand-off:
-    hold or move outward
-
-range ≤ minimum separation:
-    abort immediately
+target apparent size
+    ↓
+forward velocity command
 ```
 
-### 12.5 Guidance output
+For the initial SITL implementation:
 
-Initial output type:
+* use horizontal image error for yaw or lateral correction
+* use vertical image error for climb or descent correction
+* use target bounding-box size only as a simulated range indicator
+* apply strict command limits
+
+Create:
 
 ```python
 @dataclass(frozen=True)
 class GuidanceCommand:
     timestamp_monotonic_s: float
-    velocity_n_mps: float
-    velocity_e_mps: float
-    velocity_d_mps: float
-    yaw_deg: float | None
+    velocity_forward_mps: float
+    velocity_right_mps: float
+    velocity_down_mps: float
+    yaw_rate_deg_s: float
     valid_until_monotonic_s: float
     reason: str
 ```
 
-Every command must expire. Expired setpoints must not be transmitted.
+All guidance commands must expire.
 
----
+Expired commands must never be sent.
 
-## 13. Command Limiters
+## Initial Guidance Limits
 
-All guidance commands shall pass through a limiter chain:
+Use conservative SITL defaults:
 
-```text
-raw guidance
-    ↓
-speed limiter
-    ↓
-acceleration limiter
-    ↓
-vertical-speed limiter
-    ↓
-yaw-rate limiter
-    ↓
-closure-rate limiter
-    ↓
-geofence limiter
-    ↓
-separation limiter
-    ↓
-validated command
+```yaml
+guidance:
+  update_rate_hz: 10
+  max_forward_speed_mps: 5.0
+  max_lateral_speed_mps: 3.0
+  max_vertical_speed_mps: 2.0
+  max_acceleration_mps2: 1.5
+  max_yaw_rate_deg_s: 30.0
+  horizontal_deadband: 0.05
+  vertical_deadband: 0.05
+  target_size_setpoint: 0.12
 ```
 
-A limiter shall be able to return:
+## Tracking Safety
 
-- accepted;
-- modified;
-- rejected;
-- abort required.
+Use:
 
-Limiter decisions must be logged.
+```yaml
+safety:
+  minimum_tracking_confidence: 0.6
+  tracking_warning_timeout_s: 0.3
+  tracking_abort_timeout_s: 1.0
+  mavlink_heartbeat_timeout_s: 2.0
+  command_expiration_s: 0.25
+  minimum_separation_m: 10.0
+  maximum_test_speed_mps: 5.0
+```
 
----
+Behavior:
 
-## 14. Configuration
+```text
+Tracking valid:
+    send limited guidance commands
 
-Use YAML configuration with schema validation.
+Tracking briefly invalid:
+    command zero pursuit velocity
 
-Example:
+Tracking invalid beyond warning timeout:
+    enter HOLD
+
+Tracking invalid beyond abort timeout:
+    enter ABORT and command LOITER or RTL
+```
+
+## MAVLink Integration
+
+Use `pymavlink`.
+
+Required telemetry:
+
+* `HEARTBEAT`
+* `GLOBAL_POSITION_INT`
+* `LOCAL_POSITION_NED`
+* `ATTITUDE`
+* `VFR_HUD`
+* `SYS_STATUS`
+* `GPS_RAW_INT`
+* `EKF_STATUS_REPORT`
+* `COMMAND_ACK`
+
+Required commands:
+
+* mode change
+* arm
+* takeoff
+* velocity setpoint
+* yaw or yaw-rate setpoint
+* loiter
+* RTL
+* land
+
+Use ArduPilot `GUIDED` mode.
+
+Do not use PX4 `OFFBOARD` assumptions.
+
+Do not send:
+
+* raw motor PWM
+* direct actuator commands
+* unrestricted attitude-rate commands
+* commands without expiration
+* commands before vehicle identity is validated
+
+## ELRS Abstraction
+
+The first SITL version shall not depend directly on ELRS hardware.
+
+Create a generic MAVLink transport interface:
+
+```python
+class MavlinkTransport:
+    async def connect(self) -> None:
+        ...
+
+    async def receive(self):
+        ...
+
+    async def send(self, message) -> None:
+        ...
+
+    async def close(self) -> None:
+        ...
+```
+
+Initial implementation:
+
+```text
+UDP SITL transport
+```
+
+Future implementation:
+
+```text
+ELRS MAVLink UDP or serial transport
+```
+
+The guidance, tracking, and mission modules must not depend on whether MAVLink is transported through:
+
+* SITL UDP
+* serial telemetry
+* ELRS
+* another supported transport
+
+## Analog Video Abstraction
+
+Create a video source interface:
+
+```python
+class VideoSource:
+    async def open(self) -> None:
+        ...
+
+    async def read(self):
+        ...
+
+    async def close(self) -> None:
+        ...
+```
+
+Implement:
+
+1. Synthetic video source.
+2. Video-file source.
+3. V4L2 USB capture source.
+
+The real analog system will appear to Linux as a USB capture device such as:
+
+```text
+/dev/video0
+```
+
+The tracking code must not depend on whether frames come from synthetic video, a file, or an analog capture card.
+
+## Configuration Example
+
+Create `configs/sitl.yaml`:
 
 ```yaml
 project:
@@ -831,807 +540,169 @@ vehicle:
   source_system: 191
   source_component: 191
   guided_mode: "GUIDED"
+  hold_mode: "LOITER"
   recovery_mode: "RTL"
+  takeoff_altitude_m: 10.0
 
-target:
-  source: "cooperative_udp"
-  listen_host: "0.0.0.0"
-  listen_port: 15550
-  expected_frame: "WGS84_MSL"
-  minimum_confidence: 0.8
+vision:
+  source: "synthetic"
+  width: 640
+  height: 480
+  fps: 30
+  tracker: "CSRT"
+  show_window: true
 
 guidance:
-  type: "lead_pursuit"
   update_rate_hz: 10
-  preferred_standoff_m: 50.0
-  lookahead_time_s: 2.0
+  max_forward_speed_mps: 5.0
+  max_lateral_speed_mps: 3.0
+  max_vertical_speed_mps: 2.0
+  max_acceleration_mps2: 1.5
+  max_yaw_rate_deg_s: 30.0
+  target_size_setpoint: 0.12
 
 safety:
-  min_horizontal_separation_m: 30.0
-  min_vertical_separation_m: 15.0
-  max_closure_rate_mps: 5.0
-  max_groundspeed_mps: 15.0
-  max_acceleration_mps2: 2.0
-  target_abort_age_s: 2.0
-  return_battery_remaining_pct: 45
+  minimum_tracking_confidence: 0.6
+  tracking_warning_timeout_s: 0.3
+  tracking_abort_timeout_s: 1.0
+  mavlink_heartbeat_timeout_s: 2.0
+  command_expiration_s: 0.25
+  minimum_separation_m: 10.0
 
 logging:
   level: "INFO"
   directory: "./logs"
-  telemetry_csv: true
   event_jsonl: true
+  telemetry_csv: true
 ```
 
-Configuration shall be rejected at startup when:
+## Logging
 
-- minimum separation exceeds preferred stand-off;
-- warning age exceeds abort age;
-- return battery threshold is below abort battery threshold;
-- speed or acceleration values are non-positive;
-- connection string is invalid;
-- coordinate frame is unsupported.
+Log:
 
----
+* mission state
+* ArduPilot mode
+* armed state
+* vehicle position
+* vehicle attitude
+* tracking bounding box
+* tracking confidence
+* horizontal and vertical image error
+* raw guidance command
+* limited guidance command
+* command timestamp
+* command expiry
+* safety flags
+* abort reason
+* MAVLink acknowledgement
 
-## 15. Logging
+Use:
 
-The system shall write:
+* JSONL for events
+* CSV for time-series telemetry
 
-### 15.1 Event log
+## Tests
 
-JSON Lines format:
+Implement unit tests for:
 
-```json
-{
-  "timestamp_utc": "2026-07-28T12:00:00.000Z",
-  "timestamp_monotonic_s": 12345.67,
-  "level": "WARNING",
-  "module": "safety.supervisor",
-  "event": "TARGET_DATA_STALE",
-  "details": {
-    "age_s": 0.83,
-    "warning_threshold_s": 0.5
-  }
-}
-```
+* configuration validation
+* tracker output normalization
+* target-lost detection
+* guidance deadband
+* velocity limiting
+* acceleration limiting
+* command expiration
+* tracking timeout
+* MAVLink heartbeat timeout
+* mission state transitions
+* invalid transition rejection
+* abort behavior
 
-### 15.2 Telemetry log
+Implement integration tests for:
 
-CSV or Parquet fields:
+* synthetic video to tracker
+* tracker to guidance
+* guidance to limiter
+* MAVLink command generation
+* mission supervisor with mocked vehicle
 
-- vehicle position;
-- vehicle velocity;
-- vehicle attitude;
-- flight mode;
-- armed state;
-- battery;
-- target position;
-- target velocity;
-- target confidence;
-- relative range;
-- horizontal separation;
-- vertical separation;
-- closure rate;
-- raw guidance output;
-- limited guidance output;
-- active mission state;
-- active safety flags.
+Implement SITL tests for:
 
-### 15.3 Command log
+1. Successful MAVLink connection.
+2. Arm and takeoff.
+3. Enter `GUIDED`.
+4. Track synthetic target.
+5. Generate bounded guidance commands.
+6. Target disappears temporarily.
+7. System enters `HOLD`.
+8. Target remains missing.
+9. System enters `ABORT`.
+10. ArduPilot switches to `LOITER` or `RTL`.
+11. All events are logged.
 
-Record:
+## Scripts
 
-- command type;
-- parameters;
-- send timestamp;
-- target system/component;
-- retry count;
-- acknowledgement result;
-- telemetry confirmation;
-- final status.
-
----
-
-## 16. Status API
-
-A read-only local HTTP API may expose:
+Create:
 
 ```text
-GET /health
-GET /status
-GET /vehicle
-GET /target
-GET /mission
-GET /safety
-GET /metrics
+scripts/run_sitl.sh
+scripts/run_vulture_x.sh
+scripts/run_demo.sh
 ```
 
-Example status response:
-
-```json
-{
-  "state": "STANDOFF",
-  "vehicle_connected": true,
-  "vehicle_mode": "GUIDED",
-  "armed": true,
-  "target_valid": true,
-  "target_age_s": 0.12,
-  "range_m": 51.8,
-  "closure_rate_mps": 0.4,
-  "safety_status": "NORMAL"
-}
-```
-
-The API shall not expose command endpoints in the first version.
-
----
-
-## 17. Test Strategy
-
-### 17.1 Unit tests
-
-Required unit-test areas:
-
-- configuration validation;
-- coordinate conversion;
-- timestamp validation;
-- target stale-data detection;
-- state transition guards;
-- speed limiting;
-- acceleration limiting;
-- closure-rate calculation;
-- separation checks;
-- guidance command expiration;
-- command retry logic;
-- target estimator update and prediction.
-
-### 17.2 Integration tests
-
-Test combinations:
-
-- MAVLink client plus mocked FCU;
-- target source plus estimator;
-- estimator plus guidance;
-- guidance plus safety limiter;
-- mission supervisor plus mocked vehicle interface.
-
-### 17.3 SITL tests
-
-Minimum scenarios:
-
-1. Nominal takeoff and stand-off.
-2. Moving target with constant velocity.
-3. Target turns 90 degrees.
-4. Target stops.
-5. Target data freezes.
-6. Target telemetry becomes noisy.
-7. Target jumps outside geofence.
-8. FCU heartbeat stops.
-9. GPS becomes unhealthy.
-10. EKF reports failure.
-11. Battery crosses return threshold.
-12. Operator abort.
-13. Command acknowledgement timeout.
-14. Companion restart.
-15. Interceptor approaches minimum separation.
-
-### 17.4 HIL tests
-
-HIL shall use:
-
-- real autopilot;
-- motors disconnected or propulsion made safe;
-- simulated target;
-- real companion computer;
-- real MAVLink transport.
-
-Inject:
-
-- serial disconnection;
-- UDP packet loss;
-- delayed target packets;
-- duplicate packets;
-- out-of-order packets;
-- invalid frames;
-- target timestamp rollback;
-- companion CPU overload;
-- process crash and restart.
-
-### 17.5 Outdoor test gates
-
-Outdoor test is permitted only after:
-
-- all unit tests pass;
-- all mandatory SITL tests pass;
-- HIL abort tests pass;
-- safety pilot procedure is approved;
-- geofence is loaded and verified;
-- stand-off distance is physically marked in test plan;
-- target is cooperative;
-- test area is segregated;
-- propulsion and battery margins are documented.
-
----
-
-## 18. Acceptance Criteria
-
-Version 0.1 is accepted when:
-
-- the application connects to ArduPilot SITL;
-- vehicle health is reported correctly;
-- a simulated cooperative target is received;
-- stale target data is detected;
-- the interceptor reaches a 50 m stand-off radius without violating 30 m minimum separation;
-- closure rate never exceeds configured limit;
-- geofence violation prediction triggers abort;
-- heartbeat loss triggers RTL or configured recovery;
-- all state transitions are logged;
-- all mandatory tests pass in CI.
-
-Version 0.2 is accepted when:
-
-- target estimator supports prediction;
-- lead pursuit works in SITL;
-- replay tests reproduce guidance decisions;
-- HIL fault injection passes;
-- companion restart returns to a safe state.
-
-Version 1.0 is accepted only after controlled flight validation.
-
----
-
-## 19. Development Milestones
-
-### Milestone 0: Repository foundation
-
-Deliverables:
-
-- package structure;
-- configuration model;
-- logging;
-- type definitions;
-- CI;
-- linting;
-- unit-test framework.
-
-### Milestone 1: Vehicle interface
-
-Deliverables:
-
-- MAVLink connection;
-- heartbeat monitoring;
-- telemetry cache;
-- mode management;
-- arm and takeoff command verification;
-- ACK handling.
-
-### Milestone 2: Target ingestion
-
-Deliverables:
-
-- cooperative UDP target protocol;
-- target validation;
-- data-age monitoring;
-- replay source.
-
-### Milestone 3: Safety supervisor
-
-Deliverables:
-
-- geofence checks;
-- separation checks;
-- speed and acceleration limits;
-- abort policy;
-- battery and health guards.
-
-### Milestone 4: Mission supervisor
-
-Deliverables:
-
-- full state machine;
-- transition guards;
-- operator enable and abort;
-- deterministic recovery behavior.
-
-### Milestone 5: Guidance
-
-Deliverables:
-
-- fixed stand-off waypoint;
-- pure pursuit;
-- lead pursuit;
-- trailing mode;
-- orbit mode.
-
-### Milestone 6: SITL automation
-
-Deliverables:
-
-- target simulator;
-- repeatable scenarios;
-- automatic pass/fail metrics;
-- CI SITL test job.
-
-### Milestone 7: HIL
-
-Deliverables:
-
-- real Pixhawk connection;
-- fault injection;
-- recovery verification;
-- test report.
-
-### Milestone 8: Controlled flight test
-
-Deliverables:
-
-- test cards;
-- risk assessment;
-- preflight checklist;
-- flight logs;
-- engineering findings.
-
----
-
-## 20. Coding Standards
-
-### 20.1 Python
-
-- Python 3.11 or newer.
-- Type hints required.
-- `mypy` strict mode preferred.
-- `ruff` for linting.
-- `black` for formatting.
-- `pytest` for tests.
-- `pydantic` or equivalent for configuration validation.
-- No global mutable state.
-- No blocking MAVLink reads on the main control loop.
-- Use monotonic time for data age and command expiration.
-- Use structured logging.
-
-### 20.2 Error handling
-
-Forbidden:
-
-```python
-except Exception:
-    pass
-```
-
-Required:
-
-- catch specific exceptions where possible;
-- log the error;
-- classify severity;
-- transition to a safe state when safety-relevant;
-- preserve traceback for debugging.
-
-### 20.3 Concurrency
-
-Preferred initial design:
-
-- one asyncio event loop;
-- separate tasks for MAVLink receive, target receive, mission loop, and logging;
-- bounded queues;
-- explicit timeouts;
-- no unbounded thread creation.
-
-### 20.4 Control-loop rates
-
-Recommended initial rates:
-
-```yaml
-rates:
-  vehicle_receive_hz: 20
-  target_receive_hz: 10
-  estimator_hz: 20
-  guidance_hz: 10
-  safety_hz: 20
-  status_hz: 2
-```
-
-Control-loop overruns shall be logged.
-
----
-
-## 21. Initial Data Models
-
-```python
-from dataclasses import dataclass
-from enum import Enum, auto
-
-
-class MissionState(Enum):
-    BOOT = auto()
-    SELF_TEST = auto()
-    WAIT_FCU = auto()
-    WAIT_HOME = auto()
-    READY = auto()
-    ARMED_STANDBY = auto()
-    TAKEOFF = auto()
-    OBSERVE = auto()
-    TRACK = auto()
-    APPROACH = auto()
-    STANDOFF = auto()
-    RETURN = auto()
-    LAND = auto()
-    ABORT = auto()
-    COMPLETE = auto()
-
-
-@dataclass(frozen=True)
-class VehicleState:
-    timestamp_monotonic_s: float
-    connected: bool
-    armed: bool
-    mode: str
-    latitude_deg: float | None
-    longitude_deg: float | None
-    altitude_msl_m: float | None
-    velocity_n_mps: float | None
-    velocity_e_mps: float | None
-    velocity_d_mps: float | None
-    battery_remaining_pct: float | None
-    ekf_healthy: bool
-    gps_healthy: bool
-    home_valid: bool
-
-
-@dataclass(frozen=True)
-class RelativeState:
-    timestamp_monotonic_s: float
-    north_m: float
-    east_m: float
-    down_m: float
-    velocity_n_mps: float
-    velocity_e_mps: float
-    velocity_d_mps: float
-    horizontal_range_m: float
-    vertical_separation_m: float
-    range_3d_m: float
-    closure_rate_mps: float
-    confidence: float
-```
-
----
-
-## 22. Cooperative Target Protocol
-
-Initial transport: UDP JSON.
-
-Example:
-
-```json
-{
-  "protocol": "vulture-target-v1",
-  "source_id": "target-sitl-01",
-  "sequence": 1042,
-  "timestamp_utc": "2026-07-28T12:00:00.000Z",
-  "frame": "WGS84_MSL",
-  "position": {
-    "latitude_deg": -6.914744,
-    "longitude_deg": 107.609810,
-    "altitude_msl_m": 760.0
-  },
-  "velocity": {
-    "north_mps": 8.0,
-    "east_mps": 1.0,
-    "down_mps": 0.0
-  },
-  "accuracy": {
-    "position_m": 2.5,
-    "velocity_mps": 0.5
-  },
-  "confidence": 0.95
-}
-```
-
-Validation requirements:
-
-- protocol string must match;
-- source must be allow-listed;
-- sequence must not roll backward unexpectedly;
-- timestamp must be valid;
-- coordinates must be in valid ranges;
-- velocity must be bounded;
-- confidence must be in `[0, 1]`;
-- frame must be supported;
-- packet size must be bounded.
-
-Optional later enhancement:
-
-- message authentication;
-- signed messages;
-- replay protection;
-- source-specific keys.
-
----
-
-## 23. Safety Case Outline
-
-The repository shall include `docs/safety_case.md` covering:
-
-1. System description.
-2. Intended operating environment.
-3. Hazard identification.
-4. Hazard severity and likelihood.
-5. Risk controls.
-6. Verification evidence.
-7. Residual risk.
-8. Operational limitations.
-9. Emergency procedures.
-10. Approval status.
-
-Minimum hazards:
-
-- loss of target data;
-- wrong coordinate frame;
-- stale target position;
-- estimator divergence;
-- command saturation;
-- geofence breach;
-- loss of MAVLink;
-- companion reboot;
-- RC takeover failure;
-- battery exhaustion;
-- unexpected target maneuver;
-- navigation sensor degradation;
-- software deadlock;
-- excessive closure rate;
-- loss of visual separation.
-
----
-
-## 24. Flight-Test Philosophy
-
-Flight-test progression:
-
-```text
-desktop unit test
-    ↓
-simulation
-    ↓
-SITL multi-vehicle
-    ↓
-HIL with motors safe
-    ↓
-tethered or restrained test where applicable
-    ↓
-single-UAV observe mode
-    ↓
-dual-UAV cooperative follow
-    ↓
-stand-off approach
-    ↓
-moving-target stand-off
-```
-
-No test phase may be skipped.
-
-Each test card shall include:
-
-- objective;
-- configuration;
-- software commit;
-- autopilot firmware;
-- test area;
-- weather limits;
-- battery limits;
-- abort criteria;
-- safety pilot action;
-- expected result;
-- recorded metrics.
-
----
-
-## 25. Codex Development Instructions
-
-Use the following rules when generating code for this repository.
-
-### 25.1 General instruction
-
-Implement one milestone at a time. Do not generate placeholder functions that silently succeed. Every incomplete function must raise `NotImplementedError` or be clearly marked as pending.
-
-### 25.2 Required behavior
-
-For every feature:
-
-1. Add or update data models.
-2. Add configuration schema.
-3. Add implementation.
-4. Add unit tests.
-5. Add integration tests where applicable.
-6. Update documentation.
-7. Run linting and tests.
-8. Report assumptions and unresolved risks.
-
-### 25.3 Prohibited behavior
-
-Do not:
-
-- bypass safety checks;
-- suppress exceptions without logging;
-- hard-code IP addresses in application code;
-- use wall-clock time for data-age calculations;
-- send unbounded velocity commands;
-- arm automatically at startup;
-- ignore `COMMAND_ACK`;
-- continue guidance with stale target data;
-- use unsupported coordinate frames;
-- issue commands before FCU identity is validated;
-- mix PX4 OFFBOARD behavior into ArduPilot GUIDED logic;
-- create RF interference features;
-- add collision or contact behavior.
-
-### 25.4 Pull-request checklist
-
-Every pull request shall answer:
-
-- What safety behavior changed?
-- What new failure modes were introduced?
-- What tests prove the behavior?
-- What configuration keys were added?
-- What telemetry or log fields were added?
-- How does the system fail when the new module stops responding?
-- Does the change affect flight-test approval?
-
----
-
-## 26. Initial Codex Task Sequence
-
-Use these tasks in order.
-
-### Task 1
-
-Create the Python package, `pyproject.toml`, configuration loader, data models, enums, logging, and unit-test skeleton.
-
-Acceptance:
-
-- package imports successfully;
-- invalid configuration is rejected;
-- `pytest`, `ruff`, and `mypy` pass.
-
-### Task 2
-
-Implement an asynchronous MAVLink client with:
-
-- heartbeat detection;
-- telemetry cache;
-- connection timeout;
-- FCU identity validation;
-- command-ack tracking;
-- clean shutdown.
-
-Acceptance:
-
-- mocked heartbeat connects;
-- missing heartbeat times out;
-- mismatched autopilot identity is rejected;
-- ACK success and failure are tested.
-
-### Task 3
-
-Implement cooperative UDP target ingestion.
-
-Acceptance:
-
-- valid packets are accepted;
-- stale, malformed, oversized, unsupported-frame, and low-confidence packets are rejected;
-- packet sequence handling is tested.
-
-### Task 4
-
-Implement target age and vehicle-health safety checks.
-
-Acceptance:
-
-- warning and abort thresholds work;
-- safety results include machine-readable reason codes;
-- tests cover boundary conditions.
-
-### Task 5
-
-Implement mission state machine through `OBSERVE`.
-
-Acceptance:
-
-- all transitions use explicit guards;
-- invalid transitions are rejected;
-- abort can be entered from all active states.
-
-### Task 6
-
-Implement coordinate conversion and relative-state calculation.
-
-Acceptance:
-
-- known coordinate test vectors pass;
-- horizontal, vertical, 3D range, and closure rate are tested.
-
-### Task 7
-
-Implement fixed stand-off guidance with command limiting.
-
-Acceptance:
-
-- command goes toward stand-off point;
-- speed and acceleration limits are enforced;
-- guidance does not enter minimum separation;
-- command expiration works.
-
-### Task 8
-
-Integrate with ArduPilot SITL.
-
-Acceptance:
-
-- connect;
-- arm with explicit operator enable;
-- take off;
-- reach observe state;
-- follow a simulated target;
-- stop at stand-off;
-- abort on stale target;
-- command RTL.
-
----
-
-## 27. Definition of Done
-
-A feature is done only when:
-
-- code is typed;
-- tests pass;
-- failure behavior is defined;
-- logs are sufficient for post-flight analysis;
-- configuration is documented;
-- no safety-critical TODO remains hidden;
-- simulation evidence exists;
-- review confirms ArduPilot compatibility.
-
----
-
-## 28. Initial README Summary
-
-Suggested repository description:
-
-> Vulture-X is a safety-oriented research platform for cooperative, non-contact UAV interception using ArduPilot, MAVLink, constrained guidance, and deterministic simulation. It is designed for SITL, HIL, and controlled flight testing with explicit geofence, stand-off, command-limiting, and abort behavior.
-
----
-
-## 29. License and Compliance
-
-Recommended:
-
-- choose a clear open-source license;
-- document third-party dependencies;
-- maintain a software bill of materials;
-- comply with local aviation, radio, privacy, and test-range requirements;
-- restrict real-world operation to authorized cooperative testing.
-
----
-
-## 30. First Release Target
-
-The first release shall demonstrate:
-
-```text
-ArduPilot SITL interceptor
-        +
-cooperative target simulator
-        +
-validated target state
-        +
-relative-state estimator
-        +
-constrained stand-off guidance
-        +
-safety supervisor
-        +
-automatic RTL on fault
-        +
-replayable logs
-```
-
-This is the minimum coherent baseline. Advanced tracking, ROS 2 integration, vision, multi-vehicle coordination, and outdoor operation shall be added only after this baseline is stable.
-
+`run_demo.sh` must:
+
+1. Start ArduPilot Copter SITL.
+2. Wait for SITL readiness.
+3. Start Vulture-X.
+4. Load `configs/sitl.yaml`.
+5. Start the synthetic video source.
+6. Display tracking status.
+7. Stop all processes cleanly on exit.
+
+## Coding Rules
+
+* Use Python 3.11 or newer.
+* Use type hints.
+* Use asyncio.
+* Use monotonic time for timeouts and command expiration.
+* Use bounded queues.
+* No global mutable state.
+* No silent exception handling.
+* No hard-coded addresses outside configuration.
+* No automatic arming without explicit CLI enable flag.
+* No unrestricted control outputs.
+* No hidden fallback behavior.
+* Every safety-related failure must have a machine-readable reason code.
+
+## First Implementation Milestone
+
+Implement only the following in the first pass:
+
+1. Repository structure.
+2. Configuration loader and validation.
+3. Data models and enums.
+4. Structured logging.
+5. Synthetic video generator.
+6. OpenCV tracker.
+7. Basic image-error calculation.
+8. Guidance command model.
+9. Command limiters.
+10. Mock MAVLink vehicle interface.
+11. Mission state machine through `TRACK`.
+12. Unit tests.
+13. README with setup instructions.
+
+Do not implement real ELRS hardware support yet.
+
+Do not implement real analog capture until the synthetic video path works.
+
+After the first milestone:
+
+* run `pytest`;
+* run `ruff`;
+* run `mypy`;
+* report all generated files;
+* report assumptions;
+* report incomplete components;
+* do not claim SITL integration works unless it has been executed successfully.

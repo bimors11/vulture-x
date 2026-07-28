@@ -1,16 +1,19 @@
 # Test Plan
 
-Milestone 0 verification consists of:
+The first milestone verifies:
 
-- importing the installed package;
-- accepting the repository default configuration;
-- rejecting unknown fields, invalid endpoints, unsafe separation geometry,
-  reversed data-age thresholds, and reversed battery thresholds;
-- verifying immutable data models and command-expiration boundaries;
-- verifying parseable JSON Lines event output;
-- running `pytest`, `ruff check .`, and strict `mypy`.
+- configuration acceptance and fail-closed validation;
+- deterministic synthetic frames and disappearance scenarios;
+- bounding-box normalization and target-loss output;
+- OpenCV synthetic-video tracking integration;
+- guidance deadbands, mapping, expiry, speed limiting, and acceleration limiting;
+- tracking warning/HOLD/ABORT timeout boundaries;
+- heartbeat timeout boundaries;
+- mission transitions through TRACK, invalid transitions, ABORT, and reset;
+- mock identity, explicit arm enable, GUIDED requirement, and expired-command
+  rejection;
+- JSONL event and CSV telemetry output.
 
-SITL and HIL tests are intentionally deferred until their integration
-milestones. Empty test-suite directories reserve their eventual locations
-without implying test coverage that does not exist.
+No current test connects to ArduPilot. SITL tests remain empty until a real
+asynchronous MAVLink client exists and read-only connectivity is demonstrated.
 
