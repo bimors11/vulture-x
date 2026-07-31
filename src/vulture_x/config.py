@@ -54,7 +54,7 @@ class VisionConfig(StrictModel):
     width: int = Field(default=640, ge=64, le=7680)
     height: int = Field(default=480, ge=64, le=4320)
     fps: float = Field(default=30.0, gt=0, le=240)
-    tracker: Literal["CSRT", "KCF"] = "CSRT"
+    tracker: Literal["CSRT", "KCF", "TEMPLATE"] = "CSRT"
     show_window: bool = False
     random_seed: int = 42
     target_shape: Literal["rectangle", "circle"] = "rectangle"

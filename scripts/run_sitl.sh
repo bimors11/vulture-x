@@ -1,6 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+VEHICLE_MODE="${VULTURE_X_VEHICLE:-quad}"
+extra_args=()
+while (($# > 0)); do
+  case "$1" in
+    -quad|--quad)
+      VEHICLE_MODE="quad"
+      shift
+      ;;
+    -plane|--plane)
+      VEHICLE_MODE="plane"
+      shift
+      ;;
+    *)
+      extra_args+=("$1")
+      shift
+      ;;
+  esac
+done
+
 if [[ -z "${ARDUPILOT_DIR:-}" ]]; then
   if [[ -d "$HOME/ArduSITL/ardupilot" ]]; then
     ARDUPILOT_DIR="$HOME/ArduSITL/ardupilot"
@@ -20,12 +39,32 @@ if [[ -n "${VIRTUAL_ENV:-}" ]]; then
   unset VIRTUAL_ENV
 fi
 
+pkill -TERM -f 'mavproxy.py .*--master tcp:127\.0\.0\.1:5760' >/dev/null 2>&1 || true
+sleep 0.5
+pkill -KILL -f 'mavproxy.py .*--master tcp:127\.0\.0\.1:5760' >/dev/null 2>&1 || true
+
+case "$VEHICLE_MODE" in
+  quad)
+    vehicle="ArduCopter"
+    frame="gazebo-iris"
+    ;;
+  plane)
+    vehicle="ArduPlane"
+    frame="gazebo-zephyr"
+    ;;
+  *)
+    echo "sitl_status=failed reason=invalid_vehicle_mode value=$VEHICLE_MODE" >&2
+    exit 2
+    ;;
+esac
+
 args=(
-  -v ArduCopter
-  -f gazebo-iris
+  -v "$vehicle"
+  -f "$frame"
   --model JSON
   --out=udp:127.0.0.1:14550
   --out=udp:127.0.0.1:14551
+  --out=udp:127.0.0.1:14552
 )
 
 if [[ -z "${VULTURE_X_SITL_INTERACTIVE:-}" ]]; then
@@ -42,4 +81,4 @@ else
   args+=(--mavproxy-args=--daemon --mavproxy-args=--non-interactive)
 fi
 
-exec "$ARDUPILOT_DIR/Tools/autotest/sim_vehicle.py" "${args[@]}" "$@"
+exec "$ARDUPILOT_DIR/Tools/autotest/sim_vehicle.py" "${args[@]}" "${extra_args[@]}"

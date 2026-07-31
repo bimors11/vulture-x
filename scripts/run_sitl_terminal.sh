@@ -2,7 +2,12 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMMAND="cd '$REPO_ROOT' && export VULTURE_X_SITL_INTERACTIVE=1 && exec '$REPO_ROOT/scripts/run_sitl.sh'"
+quoted_args=""
+for arg in "$@"; do
+  printf -v quoted "%q" "$arg"
+  quoted_args+=" $quoted"
+done
+COMMAND="cd '$REPO_ROOT' && export VULTURE_X_SITL_INTERACTIVE=1 && exec '$REPO_ROOT/scripts/run_sitl.sh'$quoted_args"
 
 if command -v x-terminal-emulator >/dev/null 2>&1; then
   exec x-terminal-emulator -e bash -lc "$COMMAND"

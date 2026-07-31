@@ -364,8 +364,13 @@
     </model>
 
     <include>
-      <uri>model://iris_with_gimbal</uri>
-      <pose degrees="true">0 0 0.195 0 0 0</pose>
+      <uri>model://runway</uri>
+      <pose degrees="true">0 0 0.03 0 0 0</pose>
+    </include>
+
+    <include>
+      <uri>model://zephyr_with_camera</uri>
+      <pose degrees="true">0 0 0.422 -90 0 180</pose>
     </include>
 
     <model name="target_marker">

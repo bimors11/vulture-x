@@ -34,10 +34,29 @@ Tools/autotest/sim_vehicle.py \
 Inspect the current official instructions and installer before executing them.
 Do not force the Ubuntu prerequisite script on an unsupported Mint base.
 
-The Vulture-X SITL configuration listens at `udpin:0.0.0.0:14550` and also
-exports `udp:127.0.0.1:14551` for QGroundControl. In QGroundControl, add a UDP
-comm link that listens on port `14551` if auto-detection does not connect.
-Record exact ports because MAVProxy/SITL options can change them.
+The Vulture-X SITL configuration listens at `udpin:0.0.0.0:14550` for
+tracking/command helpers, exports `udp:127.0.0.1:14551` for QGroundControl, and
+exports `udp:127.0.0.1:14552` for the UI heartbeat/status monitor. In
+QGroundControl, add a UDP comm link that listens on port `14551` if
+auto-detection does not connect. Record exact ports because MAVProxy/SITL
+options can change them.
+
+Vulture-X launch scripts keep the original quadcopter path as the default and
+add explicit startup profile flags:
+
+```bash
+scripts/run_ui.sh -quad
+scripts/run_ui.sh -plane
+scripts/run_gazebo.sh -plane
+scripts/run_sitl.sh -plane
+```
+
+`-plane` uses the same ArduPilot checkout, `ArduPlane`, the `gazebo-zephyr`
+frame, and `simulation/worlds/vulture_x_plane.sdf`. It is a simulation
+environment profile only. The UI includes a SITL-only fixed-wing steering
+helper that switches an already-armed ArduPlane instance to `GUIDED` and uses
+ArduPlane guided speed, altitude, and heading slew commands. Fixed-wing guidance
+is still not implemented in the main Vulture-X package.
 
 The current Vulture-X milestone cannot connect to this endpoint. The next Codex
 agent must first implement and mock-test heartbeat, identity validation,
