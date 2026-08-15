@@ -8,6 +8,7 @@ import os
 import sys
 import time
 
+from mavlink_endpoint import open_mavlink_connection
 from pymavlink import mavutil
 
 
@@ -278,7 +279,7 @@ def main() -> int:
     args = parse_args()
     verify_sitl_operator_enable()
 
-    connection = mavutil.mavlink_connection(
+    connection = open_mavlink_connection(
         args.mavlink,
         source_system=args.source_system,
         source_component=args.source_component,

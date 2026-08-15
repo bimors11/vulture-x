@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
+from mavlink_endpoint import open_mavlink_connection
 from pymavlink import mavutil
 
 DEFAULT_CAMERA_PIPELINE = (
@@ -118,7 +119,7 @@ def check_ardupilot(args: argparse.Namespace) -> CheckResult:
 
 def check_mavlink(args: argparse.Namespace) -> CheckResult:
     try:
-        connection = mavutil.mavlink_connection(
+        connection = open_mavlink_connection(
             args.mavlink,
             source_system=191,
             source_component=191,

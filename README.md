@@ -234,6 +234,17 @@ with `VULTURE_X_UI_MAVLINK=udpin:0.0.0.0:PORT` only when your SITL/MAVProxy
 launch exports a separate status port. If an older SITL instance was already
 running with only port `14550`, restart it through `scripts/run_ui.sh` or
 `scripts/run_sitl.sh` so the UI receives the dedicated status stream.
+The control endpoint used by steering and the guarded plane takeoff helper is
+editable in the web UI and defaults to `udpin:0.0.0.0:14550`. It accepts UDP/TCP
+`pymavlink` endpoints and `serial:DEVICE:BAUD`, for example
+`serial:/dev/ttyUSB0:57600`. Use the `Connect MAVLink` button to validate the
+selected endpoint with a heartbeat probe before starting steering.
+
+The camera bridge defaults to the existing UDP H.264 stream on port `5600`.
+From the web UI, change Video Input to RTSP, provide an `rtsp://` or `rtsps://`
+URL, then use `Connect Video` to decode an H.264 RTSP source into the same frame
+cache used by tracking. The `Steer Target` action is pinned in the top action
+area so target tracking can be started without scrolling through tuning fields.
 
 The Gazebo launcher clears Python/OpenCV Qt plugin paths before starting Gazebo
 so the GUI can use the system Qt plugins. To run Gazebo server-only instead:

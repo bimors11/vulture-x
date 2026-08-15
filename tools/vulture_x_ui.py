@@ -23,6 +23,7 @@ from typing import Any, NamedTuple
 from urllib.parse import parse_qs, urlparse
 
 import cv2
+from mavlink_endpoint import open_mavlink_connection, parse_mavlink_endpoint
 from pymavlink import mavutil
 from track_camera_target import detect_red_target, newest_image
 
@@ -32,7 +33,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 LOG_DIR = REPO_ROOT / "logs" / "ui"
 CAMERA_DIR = LOG_DIR / "camera_frames"
 SELECTION_PATH = LOG_DIR / "custom_selection.json"
+DEFAULT_MAVLINK_ENDPOINT = os.environ.get("VULTURE_X_MAVLINK", "udpin:0.0.0.0:14550")
 MAVLINK_STATUS_ENDPOINT = os.environ.get("VULTURE_X_UI_MAVLINK", "udpin:0.0.0.0:14552")
+DEFAULT_VIDEO_SOURCE = os.environ.get("VULTURE_X_VIDEO_SOURCE", "udp")
+DEFAULT_RTSP_URL = os.environ.get("VULTURE_X_RTSP_URL", "")
 MAVLINK_STALE_AFTER_S = 3.5
 FRESH_FRAME_MAX_AGE_S = 3.0
 MAX_GUIDED_FORWARD_MPS = 5.0
@@ -187,7 +191,7 @@ class MavlinkStatusMonitor:
         while not self._stop.is_set():
             connection = None
             try:
-                connection = mavutil.mavlink_connection(
+                connection = open_mavlink_connection(
                     self.endpoint,
                     source_system=201,
                     source_component=202,
@@ -267,7 +271,7 @@ HTML = r"""<!doctype html>
     h1 { margin: 0; font-size: 20px; font-weight: 700; }
     main {
       display: grid;
-      grid-template-columns: minmax(320px, 420px) minmax(420px, 1fr);
+      grid-template-columns: minmax(360px, 500px) minmax(420px, 1fr);
       gap: 18px;
       padding: 18px;
     }
@@ -308,6 +312,28 @@ HTML = r"""<!doctype html>
       gap: 10px;
       margin-top: 14px;
     }
+    .top-actions {
+      display: grid;
+      grid-template-columns: 1.35fr 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 18px;
+    }
+    .stack { display: grid; gap: 18px; }
+    .connection-grid {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      align-items: end;
+      margin-bottom: 12px;
+    }
+    .connection-grid label { min-width: 0; }
+    .connection-grid button { min-width: 132px; }
+    .environment-controls {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 14px;
+    }
     button, input, select {
       height: 38px;
       border: 1px solid var(--line);
@@ -323,6 +349,10 @@ HTML = r"""<!doctype html>
     button.primary {
       background: #0f5d56;
       border-color: #168678;
+    }
+    button.secondary {
+      background: #17384a;
+      border-color: #27627e;
     }
     button.danger {
       background: #5d1f26;
@@ -400,7 +430,9 @@ HTML = r"""<!doctype html>
       text-transform: uppercase;
     }
     @media (max-width: 900px) {
-      main, .two { grid-template-columns: 1fr; }
+      main, .two, .top-actions, .connection-grid, .environment-controls {
+        grid-template-columns: 1fr;
+      }
       #camera { max-height: none; }
     }
   </style>
@@ -411,22 +443,56 @@ HTML = r"""<!doctype html>
     <div class="muted">Local simulation controls</div>
   </header>
   <main>
-    <div>
+    <div class="stack">
+      <section>
+        <h2>Quick Actions</h2>
+        <div class="top-actions">
+          <button class="primary" onclick="steer()">Steer Target</button>
+          <button class="secondary" onclick="connectMavlink()">Connect MAVLink</button>
+          <button class="secondary" onclick="connectVideo()">Connect Video</button>
+        </div>
+        <div class="controls">
+          <button class="danger" onclick="post('/api/stop_steering')">Stop Steering</button>
+          <button onclick="takeoff()">Plane Takeoff</button>
+        </div>
+      </section>
       <section>
         <h2>Status</h2>
         <div class="status-grid" id="status"></div>
-        <div class="controls">
+      </section>
+      <section>
+        <h2>Connections</h2>
+        <div class="connection-grid">
+          <label>Control MAVLink endpoint
+            <input id="mavlink-endpoint" value="udpin:0.0.0.0:14550">
+          </label>
+          <button class="secondary" onclick="connectMavlink()">Connect</button>
+        </div>
+        <div class="connection-grid">
+          <label>Video source
+            <select id="video-source">
+              <option value="udp" selected>UDP 5600</option>
+              <option value="rtsp">RTSP</option>
+            </select>
+          </label>
+          <button class="secondary" onclick="connectVideo()">Connect</button>
+        </div>
+        <label>RTSP URL
+          <input id="rtsp-url" placeholder="rtsp://127.0.0.1:8554/stream">
+        </label>
+      </section>
+      <section>
+        <h2>Environment</h2>
+        <div class="environment-controls">
           <button onclick="post('/api/start_gazebo')">Start Gazebo</button>
           <button onclick="post('/api/start_sitl')">Start SITL</button>
-          <button onclick="post('/api/start_takeoff')">Plane Takeoff</button>
-          <button onclick="post('/api/start_bridge')">Start Camera</button>
           <button onclick="post('/api/start_target_motion')">Move Target</button>
           <button onclick="post('/api/stop_target_motion')">Stop Target</button>
           <button onclick="post('/api/clear_camera_cache')">Clear Camera</button>
           <button class="danger" onclick="post('/api/stop_all')">Stop All</button>
         </div>
       </section>
-      <section style="margin-top:18px">
+      <section>
         <h2>Target Steering</h2>
         <div class="mode-row">
           <label>Tracking mode
@@ -539,13 +605,8 @@ HTML = r"""<!doctype html>
           </div>
         </div>
         <div class="controls">
-          <button class="primary" onclick="steer()">Steer Toward Target</button>
-          <button class="danger" onclick="post('/api/stop_steering')">Stop Steering</button>
           <button onclick="clearSelection()">Clear Selection</button>
         </div>
-        <p class="muted">
-          Steering requires SITL already airborne. Use Plane Takeoff for the FBWA/CIRCLE helper.
-        </p>
       </section>
     </div>
     <div class="camera-wrap">
@@ -577,6 +638,19 @@ HTML = r"""<!doctype html>
       const element = document.getElementById(id);
       return encodeURIComponent(element ? (element.value || fallback) : fallback);
     }
+    function mavlinkEndpoint() {
+      const element = document.getElementById('mavlink-endpoint');
+      const fallback = 'udpin:0.0.0.0:14550';
+      return encodeURIComponent(element ? (element.value || fallback) : fallback);
+    }
+    function videoSource() {
+      const element = document.getElementById('video-source');
+      return encodeURIComponent(element ? (element.value || 'udp') : 'udp');
+    }
+    function rtspUrl() {
+      const element = document.getElementById('rtsp-url');
+      return encodeURIComponent(element ? (element.value || '') : '');
+    }
     async function post(path) {
       const response = await fetch(path, {method: 'POST'});
       const data = await response.json();
@@ -600,6 +674,7 @@ HTML = r"""<!doctype html>
         : activeNumber('quad-vertical-gain', '3.5');
       let path =
         '/api/start_steering?duration=' + duration +
+        '&mavlink=' + mavlinkEndpoint() +
         '&forward_mps=' + speed +
         '&rate_hz=' + rate +
         '&max_down_mps=' + verticalSpeed +
@@ -623,6 +698,15 @@ HTML = r"""<!doctype html>
       }
       await post(path);
     }
+    async function takeoff() {
+      await post('/api/start_takeoff?mavlink=' + mavlinkEndpoint());
+    }
+    async function connectMavlink() {
+      await post('/api/connect_mavlink?mavlink=' + mavlinkEndpoint());
+    }
+    async function connectVideo() {
+      await post('/api/start_bridge?video_source=' + videoSource() + '&rtsp_url=' + rtspUrl());
+    }
     function badge(value, good) {
       const cls = good ? 'ok' : 'bad';
       return `<span class="pill ${cls}">${value}</span>`;
@@ -644,6 +728,7 @@ HTML = r"""<!doctype html>
         row('Gazebo', data.processes.gazebo ? 'running' : 'stopped', data.processes.gazebo),
         row('SITL', data.processes.sitl ? 'running' : 'stopped', data.processes.sitl),
         row('Camera Bridge', data.processes.bridge ? 'running' : 'stopped', data.processes.bridge),
+        row('Video Input', data.video.source.toUpperCase(), data.camera.live),
         row(
           'Target Motion',
           data.processes.target_motion ? 'running' : 'stopped',
@@ -663,6 +748,18 @@ HTML = r"""<!doctype html>
       currentVehicleMode = data.vehicle.mode;
       document.getElementById('quad-fields').hidden = currentVehicleMode !== 'quad';
       document.getElementById('plane-fields').hidden = currentVehicleMode !== 'plane';
+      const endpointInput = document.getElementById('mavlink-endpoint');
+      if (endpointInput && document.activeElement !== endpointInput) {
+        endpointInput.value = data.mavlink.control_endpoint || endpointInput.value;
+      }
+      const videoSourceInput = document.getElementById('video-source');
+      if (videoSourceInput && document.activeElement !== videoSourceInput) {
+        videoSourceInput.value = data.video.source || videoSourceInput.value;
+      }
+      const rtspUrlInput = document.getElementById('rtsp-url');
+      if (rtspUrlInput && document.activeElement !== rtspUrlInput) {
+        rtspUrlInput.value = data.video.rtsp_url || rtspUrlInput.value;
+      }
       document.getElementById('steer-log').textContent = data.logs.steering;
       const selectionText = data.selection.enabled
         ? `${data.selection.width.toFixed(3)} x ${data.selection.height.toFixed(3)}`
@@ -951,12 +1048,64 @@ class UiSelectionTracker:
         return self._last_bbox
 
 
+def camera_bridge_command(video_source: str, rtsp_url: str) -> list[str]:
+    sink = [
+        "!",
+        "videoconvert",
+        "!",
+        "jpegenc",
+        "!",
+        "multifilesink",
+        f"location={CAMERA_DIR}/frame-%06d.jpg",
+        "max-files=60",
+    ]
+    if video_source == "rtsp":
+        url = rtsp_url.strip()
+        if not url.startswith(("rtsp://", "rtsps://")):
+            raise ValueError("rtsp_url_required")
+        return [
+            "gst-launch-1.0",
+            "-q",
+            "rtspsrc",
+            f"location={url}",
+            "latency=100",
+            "!",
+            "rtph264depay",
+            "!",
+            "h264parse",
+            "!",
+            "avdec_h264",
+            *sink,
+        ]
+    if video_source != "udp":
+        raise ValueError("invalid_video_source")
+    return [
+        "gst-launch-1.0",
+        "-q",
+        "udpsrc",
+        "address=127.0.0.1",
+        "port=5600",
+        "reuse=false",
+        "caps=application/x-rtp,media=video,clock-rate=90000,encoding-name=H264",
+        "!",
+        "rtph264depay",
+        "!",
+        "avdec_h264",
+        *sink,
+    ]
+
+
 class AppState:
     def __init__(self, profile: VehicleProfile | None = None) -> None:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         CAMERA_DIR.mkdir(parents=True, exist_ok=True)
         self.profile = profile or VEHICLE_PROFILES[DEFAULT_VEHICLE_MODE]
         self.lock = threading.Lock()
+        self.mavlink_endpoint = DEFAULT_MAVLINK_ENDPOINT
+        self.video_source = (
+            DEFAULT_VIDEO_SOURCE if DEFAULT_VIDEO_SOURCE in {"udp", "rtsp"} else "udp"
+        )
+        self.rtsp_url = DEFAULT_RTSP_URL
         self.selection_tracker = UiSelectionTracker()
         self.gazebo = ManagedProcess(
             "gazebo",
@@ -986,27 +1135,7 @@ class AppState:
         )
         self.bridge = ManagedProcess(
             "camera bridge",
-            [
-                "gst-launch-1.0",
-                "-q",
-                "udpsrc",
-                "address=127.0.0.1",
-                "port=5600",
-                "reuse=false",
-                "caps=application/x-rtp,media=video,clock-rate=90000,encoding-name=H264",
-                "!",
-                "rtph264depay",
-                "!",
-                "avdec_h264",
-                "!",
-                "videoconvert",
-                "!",
-                "jpegenc",
-                "!",
-                "multifilesink",
-                f"location={CAMERA_DIR}/frame-%06d.jpg",
-                "max-files=60",
-            ],
+            camera_bridge_command("udp", ""),
             LOG_DIR / "camera_bridge.log",
         )
         self.target_motion = ManagedProcess(
@@ -1035,6 +1164,41 @@ class AppState:
         )
         self.messages: list[str] = []
 
+    def set_mavlink_endpoint(self, endpoint: str) -> str:
+        normalized = endpoint.strip()
+        try:
+            parse_mavlink_endpoint(normalized)
+        except ValueError as exc:
+            raise ValueError(f"invalid_mavlink_endpoint detail={exc}") from exc
+        self.mavlink_endpoint = normalized
+        return normalized
+
+    def connect_mavlink(self, endpoint: str | None = None, timeout_s: float = 3.0) -> str:
+        endpoint = (endpoint if endpoint is not None else self.mavlink_endpoint).strip()
+        try:
+            parse_mavlink_endpoint(endpoint)
+        except ValueError as exc:
+            return f"mavlink blocked reason=invalid_mavlink_endpoint detail={exc}"
+        connection = None
+        try:
+            connection = open_mavlink_connection(
+                endpoint,
+                source_system=201,
+                source_component=203,
+                autoreconnect=False,
+            )
+            heartbeat = connection.wait_heartbeat(timeout=timeout_s)
+        except Exception as exc:
+            return f"mavlink connect failed reason={exc}"
+        finally:
+            if connection is not None:
+                connection.close()
+        if heartbeat is None:
+            return "mavlink connect failed reason=heartbeat_timeout"
+        self.mavlink_endpoint = endpoint
+        mode = mavutil.mode_string_v10(heartbeat)
+        return f"mavlink connected endpoint={endpoint} mode={mode}"
+
     def configure(self, profile: VehicleProfile) -> None:
         self.profile = profile
         self.gazebo.command = ["scripts/run_gazebo.sh", profile.gazebo_arg]
@@ -1042,6 +1206,8 @@ class AppState:
         self.takeoff.command = [
             sys.executable,
             "tools/sitl_arm_takeoff.py",
+            "--mavlink",
+            self.mavlink_endpoint,
             "--vehicle",
             profile.mode,
             "--altitude-m",
@@ -1080,7 +1246,14 @@ class AppState:
         plane_max_roll_step_deg: float,
         plane_loss_hold_s: float,
         tracking_mode: str,
+        mavlink_endpoint: str | None = None,
     ) -> str:
+        if mavlink_endpoint is None:
+            mavlink_endpoint = self.mavlink_endpoint
+        try:
+            mavlink_endpoint = self.set_mavlink_endpoint(mavlink_endpoint)
+        except ValueError as exc:
+            return f"steering blocked reason={exc}"
         if not self.profile.steering_supported:
             return "steering blocked reason=fixed_wing_guidance_not_implemented"
         duration_s = max(3.0, min(120.0, duration_s))
@@ -1114,6 +1287,8 @@ class AppState:
             sys.executable,
             "tools/sitl_track_target.py",
             "--enable-guidance",
+            "--mavlink",
+            mavlink_endpoint,
             "--vehicle",
             self.profile.mode,
             "--camera-dir",
@@ -1166,11 +1341,27 @@ class AppState:
             self.steering.command.extend(["--selection-file", str(SELECTION_PATH)])
         return self.steering.start()
 
-    def start_takeoff(self) -> str:
+    def start_takeoff(self, mavlink_endpoint: str | None = None) -> str:
+        if mavlink_endpoint is None:
+            mavlink_endpoint = self.mavlink_endpoint
+        try:
+            mavlink_endpoint = self.set_mavlink_endpoint(mavlink_endpoint)
+        except ValueError as exc:
+            return f"takeoff blocked reason={exc}"
         if self.profile.mode != "plane":
             return "takeoff blocked reason=plane_profile_required"
         if self.takeoff.running():
             return "takeoff already running"
+        self.takeoff.command = [
+            sys.executable,
+            "tools/sitl_arm_takeoff.py",
+            "--mavlink",
+            mavlink_endpoint,
+            "--vehicle",
+            self.profile.mode,
+            "--altitude-m",
+            "50",
+        ]
         return self.takeoff.start()
 
     def start_gazebo(self) -> str:
@@ -1185,15 +1376,24 @@ class AppState:
         stop_stale_mavproxy()
         return self.sitl.start()
 
-    def start_bridge(self) -> str:
-        conflicts = udp_port_conflicts(5600)
+    def start_bridge(self, video_source: str | None = None, rtsp_url: str | None = None) -> str:
+        video_source = (video_source or self.video_source).strip()
+        rtsp_url = (rtsp_url if rtsp_url is not None else self.rtsp_url).strip()
+        try:
+            self.bridge.command = camera_bridge_command(video_source, rtsp_url)
+        except ValueError as exc:
+            return f"camera bridge blocked reason={exc}"
+        self.video_source = video_source
+        self.rtsp_url = rtsp_url
+        conflicts = udp_port_conflicts(5600) if video_source == "udp" else []
         if conflicts:
             return "camera bridge blocked reason=udp_5600_in_use owners=" + " | ".join(conflicts)
-        if process_running(r"gst-launch-1.0 .*port=5600"):
+        if camera_bridge_running(self.bridge):
             return "camera bridge already running"
         CAMERA_DIR.mkdir(parents=True, exist_ok=True)
         message = self.bridge.start()
-        schedule_camera_streaming_retries()
+        if video_source == "udp":
+            schedule_camera_streaming_retries()
         return message
 
     def start_target_motion(self) -> str:
@@ -1225,6 +1425,7 @@ class AppState:
         for pattern in (
             r"move_gazebo_target.py",
             r"gst-launch-1.0 .*port=5600",
+            r"gst-launch-1.0 .*rtspsrc",
             r"arducopter --model JSON",
             r"arduplane --model JSON",
             r"sim_vehicle.py .*gazebo-iris",
@@ -1283,6 +1484,14 @@ def process_running(pattern: str) -> bool:
         check=False,
     )
     return result.returncode == 0
+
+
+def camera_bridge_running(bridge: ManagedProcess) -> bool:
+    return (
+        bridge.running()
+        or process_running(r"gst-launch-1.0 .*port=5600")
+        or process_running(r"gst-launch-1.0 .*rtspsrc")
+    )
 
 
 def stop_matching_processes(pattern: str) -> None:
@@ -1488,7 +1697,9 @@ def active_camera_dir() -> Path | None:
 
 
 def mavlink_status() -> dict[str, Any]:
-    return MAVLINK_MONITOR.snapshot()
+    status = MAVLINK_MONITOR.snapshot()
+    status["control_endpoint"] = STATE.mavlink_endpoint
+    return status
 
 
 def latest_target() -> tuple[dict[str, Any], bytes | None]:
@@ -1589,7 +1800,7 @@ def status_payload() -> dict[str, Any]:
             or process_running(STATE.profile.gazebo_process_pattern),
             "sitl": STATE.sitl.running()
             or process_running(STATE.profile.sitl_process_pattern),
-            "bridge": STATE.bridge.running() or process_running(r"gst-launch-1.0 .*port=5600"),
+            "bridge": camera_bridge_running(STATE.bridge),
             "target_motion": STATE.target_motion.running()
             or process_running(r"move_gazebo_target.py"),
             "takeoff": STATE.takeoff.running(),
@@ -1601,6 +1812,10 @@ def status_payload() -> dict[str, Any]:
             "live": camera_dir is not None,
             "udp_5600_owners": port_5600_owners,
             "udp_5600_conflicts": udp_port_conflicts(5600),
+        },
+        "video": {
+            "source": STATE.video_source,
+            "rtsp_url": STATE.rtsp_url,
         },
         "selection": selection_payload(),
         "logs": {
@@ -1671,9 +1886,15 @@ class Handler(BaseHTTPRequestHandler):
                 message = STATE.start_gazebo()
             elif parsed.path == "/api/start_sitl":
                 message = STATE.start_sitl()
+            elif parsed.path == "/api/connect_mavlink":
+                mavlink_endpoint = query.get("mavlink", [STATE.mavlink_endpoint])[0]
+                message = STATE.connect_mavlink(mavlink_endpoint)
             elif parsed.path == "/api/start_bridge":
-                message = STATE.start_bridge()
+                video_source = query.get("video_source", [STATE.video_source])[0]
+                rtsp_url = query.get("rtsp_url", [STATE.rtsp_url])[0]
+                message = STATE.start_bridge(video_source, rtsp_url)
             elif parsed.path == "/api/start_steering":
+                mavlink_endpoint = query.get("mavlink", [STATE.mavlink_endpoint])[0]
                 duration = float(query.get("duration", ["20"])[0])
                 forward_mps = float(query.get("forward_mps", ["3.0"])[0])
                 rate_hz = float(query.get("rate_hz", ["10"])[0])
@@ -1729,11 +1950,13 @@ class Handler(BaseHTTPRequestHandler):
                     plane_max_roll_step_deg,
                     plane_loss_hold_s,
                     tracking_mode,
+                    mavlink_endpoint,
                 )
             elif parsed.path == "/api/stop_steering":
                 message = STATE.steering.stop()
             elif parsed.path == "/api/start_takeoff":
-                message = STATE.start_takeoff()
+                mavlink_endpoint = query.get("mavlink", [STATE.mavlink_endpoint])[0]
+                message = STATE.start_takeoff(mavlink_endpoint)
             elif parsed.path == "/api/start_target_motion":
                 message = STATE.start_target_motion()
             elif parsed.path == "/api/stop_target_motion":

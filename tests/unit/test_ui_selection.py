@@ -1,7 +1,7 @@
 import importlib.util
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 
@@ -122,8 +122,12 @@ def test_app_state_configures_plane_commands(tmp_path: Path, monkeypatch) -> Non
             plane_max_roll_step_deg=3.0,
             plane_loss_hold_s=1.5,
             tracking_mode="banner",
+            mavlink_endpoint="serial:/dev/ttyUSB0:57600",
         )
         == "steering started"
+    )
+    assert state.steering.command[state.steering.command.index("--mavlink") + 1] == (
+        "serial:/dev/ttyUSB0:57600"
     )
     assert "--vehicle" in state.steering.command
     assert "plane" in state.steering.command
@@ -224,6 +228,7 @@ def test_app_state_configures_quad_commands_without_plane_parameters(
             plane_max_roll_step_deg=3.0,
             plane_loss_hold_s=1.5,
             tracking_mode="banner",
+            mavlink_endpoint="udpin:0.0.0.0:14550",
         )
         == "steering started"
     )
@@ -248,10 +253,12 @@ def test_plane_takeoff_button_command_is_guarded(tmp_path: Path, monkeypatch) ->
     monkeypatch.setattr(module.ManagedProcess, "start", lambda self: "takeoff started")
     state = module.AppState(module.VEHICLE_PROFILES["plane"])
 
-    assert state.start_takeoff() == "takeoff started"
+    assert state.start_takeoff("serial:/dev/ttyUSB1:57600") == "takeoff started"
     assert state.takeoff.command == [
         sys.executable,
         "tools/sitl_arm_takeoff.py",
+        "--mavlink",
+        "serial:/dev/ttyUSB1:57600",
         "--vehicle",
         "plane",
         "--altitude-m",
@@ -267,6 +274,62 @@ def test_quad_profile_blocks_plane_takeoff(tmp_path: Path) -> None:
     state = module.AppState(module.VEHICLE_PROFILES["quad"])
 
     assert state.start_takeoff() == "takeoff blocked reason=plane_profile_required"
+
+
+def test_camera_bridge_accepts_rtsp_input(tmp_path: Path, monkeypatch) -> None:
+    module = load_ui_module()
+    module.LOG_DIR = tmp_path
+    module.CAMERA_DIR = tmp_path / "camera_frames"
+    monkeypatch.setattr(module.ManagedProcess, "start", lambda self: "camera bridge started")
+    monkeypatch.setattr(module, "camera_bridge_running", lambda _bridge: False)
+    state = module.AppState(module.VEHICLE_PROFILES["plane"])
+
+    assert state.start_bridge("rtsp", "rtsp://127.0.0.1:8554/cam") == "camera bridge started"
+    assert state.video_source == "rtsp"
+    assert state.rtsp_url == "rtsp://127.0.0.1:8554/cam"
+    assert state.bridge.command[:5] == [
+        "gst-launch-1.0",
+        "-q",
+        "rtspsrc",
+        "location=rtsp://127.0.0.1:8554/cam",
+        "latency=100",
+    ]
+    assert f"location={module.CAMERA_DIR}/frame-%06d.jpg" in state.bridge.command
+
+
+def test_mavlink_connect_probe_updates_control_endpoint(tmp_path: Path, monkeypatch) -> None:
+    module = load_ui_module()
+    module.LOG_DIR = tmp_path
+    module.CAMERA_DIR = tmp_path / "camera_frames"
+    opened: list[tuple[str, int, int]] = []
+
+    class FakeConnection:
+        closed = False
+
+        def wait_heartbeat(self, timeout: float) -> object:
+            assert timeout == 3.0
+            return SimpleNamespace()
+
+        def close(self) -> None:
+            self.closed = True
+
+    fake = FakeConnection()
+
+    def fake_open(endpoint: str, *, source_system: int, source_component: int, autoreconnect: bool):
+        assert autoreconnect is False
+        opened.append((endpoint, source_system, source_component))
+        return fake
+
+    monkeypatch.setattr(module, "open_mavlink_connection", fake_open)
+    monkeypatch.setattr(module.mavutil, "mode_string_v10", lambda _heartbeat: "FBWA")
+    state = module.AppState(module.VEHICLE_PROFILES["plane"])
+
+    message = state.connect_mavlink("serial:/dev/ttyUSB0:57600")
+
+    assert message == "mavlink connected endpoint=serial:/dev/ttyUSB0:57600 mode=FBWA"
+    assert state.mavlink_endpoint == "serial:/dev/ttyUSB0:57600"
+    assert opened == [("serial:/dev/ttyUSB0:57600", 201, 203)]
+    assert fake.closed is True
 
 
 def test_center_overlay_draws_without_source_selection_state(tmp_path: Path) -> None:
@@ -286,3 +349,12 @@ def test_ui_mavlink_status_uses_dedicated_sitl_stream() -> None:
 
     assert module.MAVLINK_STATUS_ENDPOINT == "udpin:0.0.0.0:14552"
     assert "--out=udp:127.0.0.1:14552" in run_sitl
+
+
+def test_mavlink_endpoint_parser_accepts_serial() -> None:
+    module = load_ui_module()
+
+    parsed = module.parse_mavlink_endpoint("serial:/dev/ttyUSB0:57600")
+
+    assert parsed.device == "/dev/ttyUSB0"
+    assert parsed.baud == 57600

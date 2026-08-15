@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import cv2
+from mavlink_endpoint import open_mavlink_connection
 from pymavlink import mavutil
 from track_camera_target import detect_red_target, newest_image, open_capture
 
@@ -1252,7 +1253,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
 
-    connection = mavutil.mavlink_connection(
+    connection = open_mavlink_connection(
         args.mavlink,
         source_system=args.source_system,
         source_component=args.source_component,
