@@ -42,14 +42,30 @@ MAX_FIXED_WING_VERTICAL_MPS = 10.0
 MAX_FIXED_WING_VERTICAL_GAIN = 80.0
 MAX_FIXED_WING_VERTICAL_LOOKAHEAD_S = 8.0
 MIN_FIXED_WING_RELATIVE_ALT_M = 15.0
-MAX_FIXED_WING_PITCH_DEG = 20.0
+MAX_FIXED_WING_PITCH_DEG = 40.0
 MAX_FIXED_WING_ROLL_DEG = 35.0
+DEFAULT_FIXED_WING_VERTICAL_GAIN = 52.0
+DEFAULT_FIXED_WING_CENTERING_GAIN = 1.15
+DEFAULT_FIXED_WING_NEAR_CENTERING_GAIN = 2.15
+DEFAULT_FIXED_WING_DAMPING_GAIN = 0.22
+DEFAULT_FIXED_WING_NEAR_DAMPING_GAIN = 0.45
+DEFAULT_FIXED_WING_PITCH_GAIN_SCALE = 1.10
+DEFAULT_FIXED_WING_PITCH_NEAR_GAIN_SCALE = 1.45
+DEFAULT_FIXED_WING_FAR_CONTROL_SCALE = 0.55
+DEFAULT_FIXED_WING_PITCH_BELOW_BOOST = 0.25
+DEFAULT_FIXED_WING_PITCH_FILTER_ALPHA = 0.25
+DEFAULT_FIXED_WING_MAX_PITCH_STEP_DEG = 2.0
+DEFAULT_FIXED_WING_MAX_ROLL_STEP_DEG = 3.0
+DEFAULT_FIXED_WING_LOSS_HOLD_S = 1.5
 CAMERA_STREAM_ENABLE_RETRY_S = (0.0, 1.0, 2.5, 5.0, 8.0)
 
 
 class VehicleProfile(NamedTuple):
     mode: str
     label: str
+    target_world: str
+    target_motion_args: tuple[str, ...]
+    autostart_target_motion: bool
     gazebo_arg: str
     sitl_arg: str
     sitl_process_pattern: str
@@ -68,6 +84,9 @@ VEHICLE_PROFILES = {
     "quad": VehicleProfile(
         mode="quad",
         label="Quadcopter",
+        target_world="vulture_x_test",
+        target_motion_args=(),
+        autostart_target_motion=True,
         gazebo_arg="-quad",
         sitl_arg="-quad",
         sitl_process_pattern=r"arducopter --model JSON",
@@ -84,6 +103,20 @@ VEHICLE_PROFILES = {
     "plane": VehicleProfile(
         mode="plane",
         label="Fixed wing",
+        target_world="vulture_x_plane",
+        target_motion_args=(
+            "--center-x",
+            "32",
+            "--center-y",
+            "-16",
+            "--center-z",
+            "5.2",
+            "--pitch-deg",
+            "8",
+            "--fixed-yaw-deg",
+            "-25",
+        ),
+        autostart_target_motion=False,
         gazebo_arg="-plane",
         sitl_arg="-plane",
         sitl_process_pattern=r"arduplane --model JSON",
@@ -358,6 +391,14 @@ HTML = r"""<!doctype html>
       white-space: pre-wrap;
     }
     .two { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    .vehicle-fields[hidden] { display: none; }
+    .field-title {
+      margin: 12px 0 8px;
+      color: var(--muted);
+      font-weight: 700;
+      font-size: 12px;
+      text-transform: uppercase;
+    }
     @media (max-width: 900px) {
       main, .two { grid-template-columns: 1fr; }
       #camera { max-height: none; }
@@ -377,6 +418,7 @@ HTML = r"""<!doctype html>
         <div class="controls">
           <button onclick="post('/api/start_gazebo')">Start Gazebo</button>
           <button onclick="post('/api/start_sitl')">Start SITL</button>
+          <button onclick="post('/api/start_takeoff')">Plane Takeoff</button>
           <button onclick="post('/api/start_bridge')">Start Camera</button>
           <button onclick="post('/api/start_target_motion')">Move Target</button>
           <button onclick="post('/api/stop_target_motion')">Stop Target</button>
@@ -389,7 +431,7 @@ HTML = r"""<!doctype html>
         <div class="mode-row">
           <label>Tracking mode
             <select id="tracking-mode">
-              <option value="orange" selected>Orange target</option>
+              <option value="banner" selected>Banner target</option>
               <option value="custom">Custom selection</option>
             </select>
           </label>
@@ -400,25 +442,101 @@ HTML = r"""<!doctype html>
         <label>Duration seconds
           <input id="duration" type="number" min="3" max="120" value="20">
         </label>
-        <div class="inline-fields">
+        <div id="quad-fields" class="vehicle-fields">
+          <div class="field-title">Quad Guidance</div>
+          <div class="inline-fields">
+            <label>Forward speed m/s
+              <input id="quad-forward-speed" type="number" min="0" max="8" step="0.1" value="3.0">
+            </label>
+            <label>Command rate Hz
+              <input id="quad-command-rate" type="number" min="1" max="20" step="1" value="10">
+            </label>
+            <label>Vertical speed m/s
+              <input id="quad-vertical-speed" type="number" min="0" max="3" step="0.1" value="3.0">
+            </label>
+            <label>Image gain
+              <input id="quad-vertical-gain" type="number" min="0" max="8" step="0.1" value="3.5">
+            </label>
+          </div>
+        </div>
+        <div id="plane-fields" class="vehicle-fields" hidden>
+          <div class="field-title">Plane Guidance</div>
+          <div class="inline-fields">
           <label>Forward speed m/s
-            <input id="forward-speed" type="number" min="0" max="20" step="0.1" value="20.0">
+            <input id="plane-forward-speed" type="number" min="0" max="20" step="0.1" value="20.0">
           </label>
           <label>Command rate Hz
-            <input id="command-rate" type="number" min="1" max="20" step="1" value="10">
+            <input id="plane-command-rate" type="number" min="1" max="20" step="1" value="10">
           </label>
           <label>Vertical speed m/s
-            <input id="vertical-speed" type="number" min="0" max="10" step="0.1" value="10.0">
+            <input id="plane-vertical-speed" type="number" min="0" max="10" step="0.1" value="10.0">
           </label>
           <label>Vertical gain
-            <input id="vertical-gain" type="number" min="0" max="80" step="1" value="40">
+            <input id="plane-vertical-gain" type="number" min="0" max="80" step="1" value="52">
           </label>
-          <label>Min rel alt m
-            <input id="min-relative-alt" type="number" min="0" max="120" step="1" value="15">
+          <label>Centering gain
+            <input id="plane-centering-gain" type="number" min="0" max="4" step="0.05" value="1.15">
+          </label>
+          <label>Near centering gain
+            <input
+              id="plane-near-centering-gain" type="number" min="0" max="4"
+              step="0.05" value="2.15"
+            >
+          </label>
+          <label>Damping gain
+            <input id="plane-damping-gain" type="number" min="0" max="3" step="0.01" value="0.22">
+          </label>
+          <label>Near damping gain
+            <input
+              id="plane-near-damping-gain" type="number" min="0" max="3"
+              step="0.01" value="0.45"
+            >
+          </label>
+          <label>Far control scale
+            <input
+              id="plane-far-control-scale" type="number" min="0.1" max="1"
+              step="0.05" value="0.55"
+            >
           </label>
           <label>Max plane pitch deg
-            <input id="max-plane-pitch" type="number" min="0" max="20" step="1" value="20">
+            <input id="max-plane-pitch" type="number" min="0" max="45" step="1" value="40">
           </label>
+          <label>Far pitch gain
+            <input id="plane-pitch-gain" type="number" min="0" max="3" step="0.1" value="1.10">
+          </label>
+          <label>Near pitch gain
+            <input id="plane-pitch-near-gain" type="number" min="0" max="5" step="0.1" value="1.45">
+          </label>
+          <label>Pitch down boost
+            <input
+              id="plane-pitch-below-boost" type="number" min="0" max="3" step="0.1" value="0.25"
+            >
+          </label>
+          <label>Pitch smoothing
+            <input
+              id="plane-pitch-filter-alpha" type="number" min="0.05" max="0.8"
+              step="0.05" value="0.25"
+            >
+          </label>
+          <label>Max pitch step deg
+            <input
+              id="plane-max-pitch-step" type="number" min="1" max="8" step="0.5"
+              value="2.0"
+            >
+          </label>
+          <label>Max roll step deg
+            <input
+              id="plane-max-roll-step" type="number" min="1" max="10" step="0.5"
+              value="3.0"
+            >
+          </label>
+          <label>Loss hold s
+            <input
+              id="plane-loss-hold" type="number" min="0" max="5" step="0.1"
+              value="1.5"
+            >
+          </label>
+          </div>
         </div>
         <div class="controls">
           <button class="primary" onclick="steer()">Steer Toward Target</button>
@@ -426,7 +544,7 @@ HTML = r"""<!doctype html>
           <button onclick="clearSelection()">Clear Selection</button>
         </div>
         <p class="muted">
-          Requires SITL already armed. This panel does not arm or take off.
+          Steering requires SITL already airborne. Use Plane Takeoff for the FBWA/CIRCLE helper.
         </p>
       </section>
     </div>
@@ -454,6 +572,11 @@ HTML = r"""<!doctype html>
     </div>
   </main>
   <script>
+    let currentVehicleMode = 'quad';
+    function activeNumber(id, fallback) {
+      const element = document.getElementById(id);
+      return encodeURIComponent(element ? (element.value || fallback) : fallback);
+    }
     async function post(path) {
       const response = await fetch(path, {method: 'POST'});
       const data = await response.json();
@@ -461,31 +584,44 @@ HTML = r"""<!doctype html>
     }
     async function steer() {
       const duration = encodeURIComponent(document.getElementById('duration').value || '20');
-      const speed = encodeURIComponent(document.getElementById('forward-speed').value || '20.0');
-      const rate = encodeURIComponent(document.getElementById('command-rate').value || '10');
-      const verticalSpeed = encodeURIComponent(
-        document.getElementById('vertical-speed').value || '3.0'
-      );
-      const verticalGain = encodeURIComponent(
-        document.getElementById('vertical-gain').value || '40'
-      );
-      const minRelativeAlt = encodeURIComponent(
-        document.getElementById('min-relative-alt').value || '15'
-      );
-      const maxPlanePitch = encodeURIComponent(
-        document.getElementById('max-plane-pitch').value || '20'
-      );
-      const mode = encodeURIComponent(document.getElementById('tracking-mode').value || 'orange');
-      await post(
+      const mode = encodeURIComponent(document.getElementById('tracking-mode').value || 'banner');
+      const isPlane = currentVehicleMode === 'plane';
+      const speed = isPlane
+        ? activeNumber('plane-forward-speed', '20.0')
+        : activeNumber('quad-forward-speed', '3.0');
+      const rate = isPlane
+        ? activeNumber('plane-command-rate', '10')
+        : activeNumber('quad-command-rate', '10');
+      const verticalSpeed = isPlane
+        ? activeNumber('plane-vertical-speed', '10.0')
+        : activeNumber('quad-vertical-speed', '3.0');
+      const verticalGain = isPlane
+        ? activeNumber('plane-vertical-gain', '52')
+        : activeNumber('quad-vertical-gain', '3.5');
+      let path =
         '/api/start_steering?duration=' + duration +
         '&forward_mps=' + speed +
         '&rate_hz=' + rate +
         '&max_down_mps=' + verticalSpeed +
         '&vertical_gain=' + verticalGain +
-        '&min_relative_alt_m=' + minRelativeAlt +
-        '&max_plane_pitch_deg=' + maxPlanePitch +
-        '&tracking_mode=' + mode
-      );
+        '&tracking_mode=' + mode;
+      if (isPlane) {
+        path +=
+          '&plane_centering_gain=' + activeNumber('plane-centering-gain', '1.15') +
+          '&plane_near_centering_gain=' + activeNumber('plane-near-centering-gain', '2.15') +
+          '&plane_damping_gain=' + activeNumber('plane-damping-gain', '0.22') +
+          '&plane_near_damping_gain=' + activeNumber('plane-near-damping-gain', '0.45') +
+          '&plane_far_control_scale=' + activeNumber('plane-far-control-scale', '0.55') +
+          '&max_plane_pitch_deg=' + activeNumber('max-plane-pitch', '40') +
+          '&plane_pitch_gain_scale=' + activeNumber('plane-pitch-gain', '1.10') +
+          '&plane_pitch_near_gain_scale=' + activeNumber('plane-pitch-near-gain', '1.45') +
+          '&plane_pitch_below_center_boost=' + activeNumber('plane-pitch-below-boost', '0.25') +
+          '&plane_pitch_filter_alpha=' + activeNumber('plane-pitch-filter-alpha', '0.25') +
+          '&plane_max_pitch_step_deg=' + activeNumber('plane-max-pitch-step', '2.0') +
+          '&plane_max_roll_step_deg=' + activeNumber('plane-max-roll-step', '3.0') +
+          '&plane_loss_hold_s=' + activeNumber('plane-loss-hold', '1.5');
+      }
+      await post(path);
     }
     function badge(value, good) {
       const cls = good ? 'ok' : 'bad';
@@ -514,6 +650,7 @@ HTML = r"""<!doctype html>
           data.processes.target_motion
         ),
         row('Live Frames', data.camera.live ? 'live' : 'stale', data.camera.live),
+        row('Takeoff', data.processes.takeoff ? 'running' : 'idle', !data.processes.takeoff),
         row(
           'MAVLink',
           data.mavlink.connected ? data.mavlink.mode : 'offline',
@@ -523,6 +660,9 @@ HTML = r"""<!doctype html>
         row('Target', target, data.target.detected),
         row('Steering', data.processes.steering ? 'running' : 'idle', !data.processes.steering),
       ].join('');
+      currentVehicleMode = data.vehicle.mode;
+      document.getElementById('quad-fields').hidden = currentVehicleMode !== 'quad';
+      document.getElementById('plane-fields').hidden = currentVehicleMode !== 'plane';
       document.getElementById('steer-log').textContent = data.logs.steering;
       const selectionText = data.selection.enabled
         ? `${data.selection.width.toFixed(3)} x ${data.selection.height.toFixed(3)}`
@@ -531,7 +671,9 @@ HTML = r"""<!doctype html>
       drawStoredSelection(data.selection);
       const owners = data.camera.udp_5600_owners.join('\n');
       document.getElementById('system-log').textContent =
-        data.logs.system + (owners ? '\n\nUDP 5600:\n' + owners : '');
+        data.logs.system +
+        (data.logs.takeoff ? '\n\nTakeoff:\n' + data.logs.takeoff : '') +
+        (owners ? '\n\nUDP 5600:\n' + owners : '');
     }
     function refreshFrame() {
       document.getElementById('camera').src = '/api/frame.jpg?t=' + Date.now();
@@ -548,7 +690,7 @@ HTML = r"""<!doctype html>
     async function clearSelection() {
       const response = await fetch('/api/selection/clear', {method: 'POST'});
       refresh(await response.json());
-      document.getElementById('tracking-mode').value = 'orange';
+      document.getElementById('tracking-mode').value = 'banner';
     }
     function imageContentRect() {
       const img = document.getElementById('camera');
@@ -829,6 +971,19 @@ class AppState:
             {"VULTURE_X_SITL_INTERACTIVE": "0"},
             terminal=True,
         )
+        self.takeoff = ManagedProcess(
+            "takeoff",
+            [
+                sys.executable,
+                "tools/sitl_arm_takeoff.py",
+                "--vehicle",
+                self.profile.mode,
+                "--altitude-m",
+                "50",
+            ],
+            LOG_DIR / "takeoff.log",
+            {"VULTURE_X_ALLOW_SITL_ARM": "1"},
+        )
         self.bridge = ManagedProcess(
             "camera bridge",
             [
@@ -856,7 +1011,13 @@ class AppState:
         )
         self.target_motion = ManagedProcess(
             "target motion",
-            [sys.executable, "tools/move_gazebo_target.py"],
+            [
+                sys.executable,
+                "tools/move_gazebo_target.py",
+                "--world",
+                self.profile.target_world,
+                *self.profile.target_motion_args,
+            ],
             LOG_DIR / "target_motion.log",
         )
         self.steering = ManagedProcess(
@@ -878,6 +1039,21 @@ class AppState:
         self.profile = profile
         self.gazebo.command = ["scripts/run_gazebo.sh", profile.gazebo_arg]
         self.sitl.command = ["scripts/run_sitl.sh", profile.sitl_arg]
+        self.takeoff.command = [
+            sys.executable,
+            "tools/sitl_arm_takeoff.py",
+            "--vehicle",
+            profile.mode,
+            "--altitude-m",
+            "50" if profile.mode == "plane" else "5",
+        ]
+        self.target_motion.command = [
+            sys.executable,
+            "tools/move_gazebo_target.py",
+            "--world",
+            profile.target_world,
+            *profile.target_motion_args,
+        ]
 
     def remember(self, message: str) -> None:
         self.messages.append(f"{time.strftime('%H:%M:%S')} {message}")
@@ -890,8 +1066,19 @@ class AppState:
         rate_hz: float,
         max_down_mps: float,
         vertical_gain: float,
-        min_relative_alt_m: float,
+        plane_centering_gain: float,
+        plane_near_centering_gain: float,
+        plane_damping_gain: float,
+        plane_near_damping_gain: float,
+        plane_far_control_scale: float,
         max_plane_pitch_deg: float,
+        plane_pitch_gain_scale: float,
+        plane_pitch_near_gain_scale: float,
+        plane_pitch_below_center_boost: float,
+        plane_pitch_filter_alpha: float,
+        plane_max_pitch_step_deg: float,
+        plane_max_roll_step_deg: float,
+        plane_loss_hold_s: float,
         tracking_mode: str,
     ) -> str:
         if not self.profile.steering_supported:
@@ -901,9 +1088,22 @@ class AppState:
         rate_hz = max(1.0, min(20.0, rate_hz))
         max_down_mps = max(0.0, min(self.profile.max_vertical_mps, max_down_mps))
         vertical_gain = max(0.0, min(self.profile.max_vertical_gain, vertical_gain))
-        min_relative_alt_m = max(self.profile.min_relative_alt_m, min_relative_alt_m)
+        plane_centering_gain = max(0.0, min(4.0, plane_centering_gain))
+        plane_near_centering_gain = max(0.0, min(4.0, plane_near_centering_gain))
+        plane_damping_gain = max(0.0, min(3.0, plane_damping_gain))
+        plane_near_damping_gain = max(0.0, min(3.0, plane_near_damping_gain))
+        plane_far_control_scale = max(0.1, min(1.0, plane_far_control_scale))
         max_plane_pitch_deg = max(0.0, min(self.profile.max_pitch_deg, max_plane_pitch_deg))
-        if tracking_mode not in {"orange", "custom"}:
+        plane_pitch_gain_scale = max(0.0, min(3.0, plane_pitch_gain_scale))
+        plane_pitch_near_gain_scale = max(0.0, min(5.0, plane_pitch_near_gain_scale))
+        plane_pitch_below_center_boost = max(0.0, min(3.0, plane_pitch_below_center_boost))
+        plane_pitch_filter_alpha = max(0.05, min(0.8, plane_pitch_filter_alpha))
+        plane_max_pitch_step_deg = max(1.0, min(8.0, plane_max_pitch_step_deg))
+        plane_max_roll_step_deg = max(1.0, min(10.0, plane_max_roll_step_deg))
+        plane_loss_hold_s = max(0.0, min(5.0, plane_loss_hold_s))
+        if tracking_mode == "orange":
+            tracking_mode = "banner"
+        if tracking_mode not in {"banner", "custom"}:
             return "steering blocked reason=invalid_tracking_mode"
         if tracking_mode == "custom" and load_selection() is None:
             return "steering blocked reason=missing_custom_selection"
@@ -928,16 +1128,50 @@ class AppState:
             str(max_down_mps),
             "--vertical-gain",
             str(vertical_gain),
-            "--min-relative-alt-m",
-            str(min_relative_alt_m),
-            "--max-plane-pitch-deg",
-            str(max_plane_pitch_deg),
             "--tracking-mode",
             tracking_mode,
         ]
+        if self.profile.mode == "plane":
+            self.steering.command.extend(
+                [
+                    "--plane-centering-gain",
+                    str(plane_centering_gain),
+                    "--plane-near-centering-gain",
+                    str(plane_near_centering_gain),
+                    "--plane-damping-gain",
+                    str(plane_damping_gain),
+                    "--plane-near-damping-gain",
+                    str(plane_near_damping_gain),
+                    "--plane-far-control-scale",
+                    str(plane_far_control_scale),
+                    "--max-plane-pitch-deg",
+                    str(max_plane_pitch_deg),
+                    "--plane-pitch-gain-scale",
+                    str(plane_pitch_gain_scale),
+                    "--plane-pitch-near-gain-scale",
+                    str(plane_pitch_near_gain_scale),
+                    "--plane-pitch-below-center-boost",
+                    str(plane_pitch_below_center_boost),
+                    "--plane-pitch-filter-alpha",
+                    str(plane_pitch_filter_alpha),
+                    "--plane-max-pitch-step-deg",
+                    str(plane_max_pitch_step_deg),
+                    "--plane-max-roll-step-deg",
+                    str(plane_max_roll_step_deg),
+                    "--plane-loss-hold-s",
+                    str(plane_loss_hold_s),
+                ]
+            )
         if tracking_mode == "custom":
             self.steering.command.extend(["--selection-file", str(SELECTION_PATH)])
         return self.steering.start()
+
+    def start_takeoff(self) -> str:
+        if self.profile.mode != "plane":
+            return "takeoff blocked reason=plane_profile_required"
+        if self.takeoff.running():
+            return "takeoff already running"
+        return self.takeoff.start()
 
     def start_gazebo(self) -> str:
         if process_running(self.profile.gazebo_process_pattern):
@@ -968,16 +1202,21 @@ class AppState:
         return self.target_motion.start()
 
     def auto_start(self) -> list[str]:
-        return [
+        messages = [
             self.start_gazebo(),
             self.start_sitl(),
             self.start_bridge(),
-            self.start_target_motion(),
         ]
+        if self.profile.autostart_target_motion:
+            messages.append(self.start_target_motion())
+        else:
+            messages.append("target motion skipped reason=static_plane_banner")
+        return messages
 
     def stop_all(self) -> list[str]:
         messages = [
             self.steering.stop(),
+            self.takeoff.stop(),
             self.target_motion.stop(),
             self.bridge.stop(),
             self.sitl.stop(),
@@ -1131,7 +1370,7 @@ def load_selection() -> dict[str, float | bool | str] | None:
 def selection_payload() -> dict[str, float | bool | str]:
     selection = load_selection()
     if selection is None:
-        return {"enabled": False, "mode": "orange", "x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0}
+        return {"enabled": False, "mode": "banner", "x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0}
     tracked = STATE.selection_tracker.payload()
     return tracked or {**selection, "tracking": "initializing"}
 
@@ -1266,14 +1505,14 @@ def latest_target() -> tuple[dict[str, Any], bytes | None]:
     if selection is not None:
         bbox = STATE.selection_tracker.bbox(frame, image_path)
     else:
-        bbox = detect_red_target(frame, 80.0)
+        bbox = detect_red_target(frame, 25.0)
     target: dict[str, Any] = {"detected": False, "detail": "not detected"}
     if bbox is not None:
         x, y, width, height = bbox
         frame_height, frame_width = frame.shape[:2]
         center_x = (x + width / 2) / frame_width
         center_y = (y + height / 2) / frame_height
-        mode = "custom" if selection is not None else "orange"
+        mode = "custom" if selection is not None else "banner"
         target = {
             "detected": True,
             "mode": mode,
@@ -1299,8 +1538,29 @@ def latest_target() -> tuple[dict[str, Any], bytes | None]:
         sw = int(float(selection["width"]) * frame_width)
         sh = int(float(selection["height"]) * frame_height)
         cv2.rectangle(frame, (sx, sy), (sx + sw, sy + sh), (90, 90, 255), 2)
+    draw_center_overlay(frame)
     ok, encoded = cv2.imencode(".jpg", frame)
     return target, encoded.tobytes() if ok else None
+
+
+def draw_center_overlay(frame: Any) -> None:
+    frame_height, frame_width = frame.shape[:2]
+    box_width = max(24, round(frame_width * 0.16))
+    box_height = max(18, round(frame_height * 0.16))
+    center_x = frame_width // 2
+    center_y = frame_height // 2
+    left = center_x - box_width // 2
+    top = center_y - box_height // 2
+    right = center_x + box_width // 2
+    bottom = center_y + box_height // 2
+    color = (255, 255, 255)
+    shadow = (0, 0, 0)
+    cv2.rectangle(frame, (left, top), (right, bottom), shadow, 3)
+    cv2.rectangle(frame, (left, top), (right, bottom), color, 1)
+    cv2.line(frame, (center_x - 10, center_y), (center_x + 10, center_y), shadow, 3)
+    cv2.line(frame, (center_x, center_y - 10), (center_x, center_y + 10), shadow, 3)
+    cv2.line(frame, (center_x - 10, center_y), (center_x + 10, center_y), color, 1)
+    cv2.line(frame, (center_x, center_y - 10), (center_x, center_y + 10), color, 1)
 
 
 def tail(path: Path, lines: int = 80) -> str:
@@ -1332,6 +1592,7 @@ def status_payload() -> dict[str, Any]:
             "bridge": STATE.bridge.running() or process_running(r"gst-launch-1.0 .*port=5600"),
             "target_motion": STATE.target_motion.running()
             or process_running(r"move_gazebo_target.py"),
+            "takeoff": STATE.takeoff.running(),
             "steering": STATE.steering.running(),
         },
         "mavlink": mavlink_status(),
@@ -1343,6 +1604,7 @@ def status_payload() -> dict[str, Any]:
         },
         "selection": selection_payload(),
         "logs": {
+            "takeoff": tail(LOG_DIR / "takeoff.log", 40),
             "steering": tail(LOG_DIR / "steering.log", 60),
             "system": "\n".join(STATE.messages[-12:]),
         },
@@ -1416,22 +1678,62 @@ class Handler(BaseHTTPRequestHandler):
                 forward_mps = float(query.get("forward_mps", ["3.0"])[0])
                 rate_hz = float(query.get("rate_hz", ["10"])[0])
                 max_down_mps = float(query.get("max_down_mps", ["3.0"])[0])
-                vertical_gain = float(query.get("vertical_gain", ["3.5"])[0])
-                min_relative_alt_m = float(query.get("min_relative_alt_m", ["15"])[0])
-                max_plane_pitch_deg = float(query.get("max_plane_pitch_deg", ["20"])[0])
-                tracking_mode = query.get("tracking_mode", ["orange"])[0]
+                vertical_gain = float(query.get("vertical_gain", ["52"])[0])
+                plane_centering_gain = float(query.get("plane_centering_gain", ["1.15"])[0])
+                plane_near_centering_gain = float(
+                    query.get("plane_near_centering_gain", ["2.15"])[0]
+                )
+                plane_damping_gain = float(query.get("plane_damping_gain", ["0.22"])[0])
+                plane_near_damping_gain = float(
+                    query.get("plane_near_damping_gain", ["0.45"])[0]
+                )
+                plane_far_control_scale = float(
+                    query.get("plane_far_control_scale", ["0.55"])[0]
+                )
+                max_plane_pitch_deg = float(query.get("max_plane_pitch_deg", ["40"])[0])
+                plane_pitch_gain_scale = float(query.get("plane_pitch_gain_scale", ["1.10"])[0])
+                plane_pitch_near_gain_scale = float(
+                    query.get("plane_pitch_near_gain_scale", ["1.45"])[0]
+                )
+                plane_pitch_below_center_boost = float(
+                    query.get("plane_pitch_below_center_boost", ["0.25"])[0]
+                )
+                plane_pitch_filter_alpha = float(
+                    query.get("plane_pitch_filter_alpha", ["0.25"])[0]
+                )
+                plane_max_pitch_step_deg = float(
+                    query.get("plane_max_pitch_step_deg", ["2.0"])[0]
+                )
+                plane_max_roll_step_deg = float(
+                    query.get("plane_max_roll_step_deg", ["3.0"])[0]
+                )
+                plane_loss_hold_s = float(query.get("plane_loss_hold_s", ["1.5"])[0])
+                tracking_mode = query.get("tracking_mode", ["banner"])[0]
                 message = STATE.start_steering(
                     duration,
                     forward_mps,
                     rate_hz,
                     max_down_mps,
                     vertical_gain,
-                    min_relative_alt_m,
+                    plane_centering_gain,
+                    plane_near_centering_gain,
+                    plane_damping_gain,
+                    plane_near_damping_gain,
+                    plane_far_control_scale,
                     max_plane_pitch_deg,
+                    plane_pitch_gain_scale,
+                    plane_pitch_near_gain_scale,
+                    plane_pitch_below_center_boost,
+                    plane_pitch_filter_alpha,
+                    plane_max_pitch_step_deg,
+                    plane_max_roll_step_deg,
+                    plane_loss_hold_s,
                     tracking_mode,
                 )
             elif parsed.path == "/api/stop_steering":
                 message = STATE.steering.stop()
+            elif parsed.path == "/api/start_takeoff":
+                message = STATE.start_takeoff()
             elif parsed.path == "/api/start_target_motion":
                 message = STATE.start_target_motion()
             elif parsed.path == "/api/stop_target_motion":

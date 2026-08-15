@@ -54,9 +54,10 @@ scripts/run_sitl.sh -plane
 `-plane` uses the same ArduPilot checkout, `ArduPlane`, the `gazebo-zephyr`
 frame, and `simulation/worlds/vulture_x_plane.sdf`. It is a simulation
 environment profile only. The UI includes a SITL-only fixed-wing steering
-helper that switches an already-armed ArduPlane instance to `GUIDED` and uses
-ArduPlane guided speed, altitude, and heading slew commands. Fixed-wing guidance
-is still not implemented in the main Vulture-X package.
+helper that switches an already-armed ArduPlane instance to `FBWA` and uses
+bounded RC roll/pitch overrides plus an airspeed-based throttle governor.
+Fixed-wing guidance is still not
+implemented in the main Vulture-X package.
 
 The current Vulture-X milestone cannot connect to this endpoint. The next Codex
 agent must first implement and mock-test heartbeat, identity validation,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Non-commanding OpenCV diagnostic for the red Gazebo target."""
+"""Non-commanding OpenCV diagnostic for the Gazebo tracking banner."""
 
 from __future__ import annotations
 
@@ -89,10 +89,142 @@ def start_gstreamer_bridge() -> tuple[subprocess.Popen[str], Path] | None:
     return process, camera_dir
 
 
-def detect_red_target(frame: np.ndarray, min_area: float) -> tuple[int, int, int, int] | None:
+def detect_banner_target(frame: np.ndarray, min_area: float) -> tuple[int, int, int, int] | None:
+    """Detect the high-contrast magenta banner with a dark center mark.
+
+    The plane world intentionally uses a large square-ish magenta banner instead
+    of a small object. This detector prefers bright near-square components
+    that contain a dark mark near their center, which avoids locking on runway
+    markings or plain color patches.
+    """
+
+    color_mask = target_color_mask(frame)
+    banner_mask = cv2.morphologyEx(color_mask, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    banner_mask = cv2.morphologyEx(
+        banner_mask,
+        cv2.MORPH_CLOSE,
+        np.ones((19, 19), np.uint8),
+    )
+    marked_bbox = choose_target_candidate(frame, banner_mask, min_area, require_mark=True)
+    if marked_bbox is not None:
+        return marked_bbox
+
+    blob_mask = cv2.morphologyEx(color_mask, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    blob_mask = cv2.morphologyEx(blob_mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    return choose_target_candidate(frame, blob_mask, min_area, require_mark=False)
+
+
+def target_color_mask(frame: np.ndarray) -> np.ndarray:
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    lower_red_a = np.array([0, 90, 80], dtype=np.uint8)
-    upper_red_a = np.array([12, 255, 255], dtype=np.uint8)
+    hsv_mask = cv2.inRange(
+        hsv,
+        np.array([130, 45, 55], dtype=np.uint8),
+        np.array([175, 255, 255], dtype=np.uint8),
+    )
+    bgr = frame.astype(np.int16)
+    blue = bgr[:, :, 0]
+    green = bgr[:, :, 1]
+    red = bgr[:, :, 2]
+    bgr_mask = (
+        (red > 95)
+        & (blue > 70)
+        & (green < 150)
+        & (red > green + 30)
+        & (blue > green + 25)
+    ).astype(np.uint8) * 255
+    return cv2.bitwise_or(hsv_mask, bgr_mask)
+
+
+def choose_target_candidate(
+    frame: np.ndarray,
+    mask: np.ndarray,
+    min_area: float,
+    *,
+    require_mark: bool,
+) -> tuple[int, int, int, int] | None:
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    best_bbox: tuple[int, int, int, int] | None = None
+    best_score = 0.0
+    frame_area = float(frame.shape[0] * frame.shape[1])
+
+    for contour in contours:
+        contour_area = float(cv2.contourArea(contour))
+        if contour_area < min_area:
+            continue
+        x, y, width, height = cv2.boundingRect(contour)
+        if width <= 0 or height <= 0:
+            continue
+        touches_frame_edge = (
+            x <= 2
+            or y <= 2
+            or x + width >= frame.shape[1] - 2
+            or y + height >= frame.shape[0] - 2
+        )
+        if touches_frame_edge:
+            continue
+
+        bbox_area = float(width * height)
+        if bbox_area > frame_area * 0.35:
+            continue
+        if width > frame.shape[1] * 0.80 or height > frame.shape[0] * 0.70:
+            continue
+        if not require_mark and (width > frame.shape[1] * 0.35 or height > frame.shape[0] * 0.35):
+            continue
+        aspect = width / height
+        if aspect < 0.18 or aspect > 5.0:
+            continue
+        fill_ratio = contour_area / bbox_area
+        if fill_ratio < 0.18:
+            continue
+
+        roi_gray = gray[y : y + height, x : x + width]
+        dark_mask = cv2.inRange(roi_gray, 0, 85)
+        dark_ratio = float(cv2.countNonZero(dark_mask)) / bbox_area
+        center_roi = dark_mask[
+            height // 3 : max(height // 3 + 1, 2 * height // 3),
+            width // 3 : max(width // 3 + 1, 2 * width // 3),
+        ]
+        center_dark_ratio = (
+            float(cv2.countNonZero(center_roi)) / float(center_roi.size)
+            if center_roi.size
+            else 0.0
+        )
+        if require_mark and (dark_ratio < 0.001 or center_dark_ratio < 0.003):
+            continue
+        if not require_mark and contour_area < max(min_area * 2.5, 80.0):
+            continue
+
+        squareness = 1.0 - min(1.0, abs(1.0 - aspect))
+        score = contour_area * (1.0 + squareness + center_dark_ratio)
+        if not require_mark:
+            center_y = y + height / 2.0
+            score *= 1.0 + 0.25 * (center_y / max(1.0, frame.shape[0]))
+        if score > best_score:
+            best_score = score
+            pad = 2
+            left = max(0, int(x) - pad)
+            top = max(0, int(y) - pad)
+            right = min(frame.shape[1], int(x + width) + pad)
+            bottom = min(frame.shape[0], int(y + height) + pad)
+            best_bbox = (left, top, right - left, bottom - top)
+
+    return best_bbox
+
+
+def detect_red_target(frame: np.ndarray, min_area: float) -> tuple[int, int, int, int] | None:
+    """Compatibility wrapper for the current default banner-target mode."""
+
+    return detect_banner_target(frame, min_area)
+
+
+def detect_colored_target(frame: np.ndarray, min_area: float) -> tuple[int, int, int, int] | None:
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    lower_red_a = np.array([0, 70, 70], dtype=np.uint8)
+    upper_red_a = np.array([30, 255, 255], dtype=np.uint8)
     lower_red_b = np.array([168, 90, 80], dtype=np.uint8)
     upper_red_b = np.array([180, 255, 255], dtype=np.uint8)
     mask = cv2.bitwise_or(
@@ -100,6 +232,7 @@ def detect_red_target(frame: np.ndarray, min_area: float) -> tuple[int, int, int
         cv2.inRange(hsv, lower_red_b, upper_red_b),
     )
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((11, 11), np.uint8))
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None

@@ -10,10 +10,78 @@ update, loss reporting, bounding-box validation, and reset. Synthetic tests use
 the generator's known initial bounding box; the SITL UI can provide manual ROI
 selection for local simulation helpers.
 
+The quad tracking path also includes the RDV-style point-to-ROI initialization
+method. A click point can be resolved against externally supplied detections by
+first choosing the smallest detection that contains the click, then the nearest
+detection inside a bounded search radius, then a small clamped fallback square.
+Selected detection boxes are padded before tracker initialization. This keeps
+the RDV interaction pattern without adding RDV's DepthAI/YOLO runtime dependency
+to the first-milestone package.
+
+After a tracking loss, callers that have an independent detector can ask
+`OpenCvTracker.relock_from_detections` to reinitialize from the highest
+confidence detection. No hardware camera, YOLO model, or fixed-wing/plane
+guidance path is added by this package-level support.
+
 The `TEMPLATE` matcher searches near the last bounding box with OpenCV template
 matching, rejects matches below a configured score, and slowly updates its
-template after successful locks. It uses the same local-search behavior as the
-prototype, with an added low-variance path for solid-color synthetic markers.
+template after successful locks. It searches several nearby scales and blends
+the resulting center and width/height so a manually selected small far-target
+ROI can grow or shrink as apparent target size changes without command spikes.
+It rejects implausible center jumps and area changes before updating the lock.
+It uses the same local-search behavior as the prototype, with an added
+low-variance path for solid-color synthetic markers.
+
+The SITL helper's default detector mode uses the Gazebo tracking banner rather
+than a small color blob. It searches for bright-magenta square-ish regions with a
+dark center crosshair/X mark, then initializes the local template tracker from
+that detected ROI. This makes the initial fixed-wing lock more stable while the
+aircraft is moving and avoids selecting unrelated runway markings or plain
+magenta patches. Banner candidates touching the image edge are rejected because
+their cropped bbox center is not the real banner center. During banner tracking,
+the helper revalidates with the detector on each frame and accepts only
+plausible near-previous bbox transitions, which reduces jumps to unrelated
+magenta regions.
+
+For manual custom selections in SITL, the plane world includes dense visual-only
+ground grass feature strips around the tracking area. These low static visuals
+add corners and color variation for template/CSRT/KCF lock without changing
+ground collision or vehicle dynamics.
+
+The fixed-wing SITL helper applies a small image-error deadband before roll and
+pitch correction, and its RC pitch mapping follows the ArduPlane convention that
+lower pitch-channel PWM commands nose-down and higher PWM commands nose-up. This
+helper remains simulation-only. Both banner tracking and custom ROI selection
+share the same controller: far targets are acquired with softened roll/pitch
+authority, while near targets keep enough pitch-down authority to dive toward
+the selected center.
+
+For fixed-wing SITL steering, the controller is explicitly centered on the
+camera crosshair. It applies scheduled proportional gain to both roll and pitch:
+`plane_centering_gain` while the target is far, blending toward
+`plane_near_centering_gain` as the bounding box grows. A far-target control
+scale keeps initial acquisition smooth but still leaves enough authority to keep
+the target pulled toward the crosshair throughout the approach. Roll/pitch step
+limits prevent one-frame command jumps. Near the target, the default taper is
+released so the plane can continue to pitch down toward the target center
+instead of floating above it. A small scheduled damping term opposes image-error
+rate without masking the proportional correction, so the controller stays
+assertive when a near banner or custom selection is still off center. If the
+fixed-wing tracker briefly loses the
+target, the SITL helper holds the last roll/pitch/throttle command for the
+bounded `plane_loss_hold_s` window before returning to neutral search. Commands
+are then bounded with read-only
+ArduPlane response parameters when available. At startup the helper requests
+common roll, pitch, throttle, airspeed, L1, and servo PID/time-constant
+parameters such as `LIM_ROLL_CD`, `LIM_PITCH_MAX`, `LIM_PITCH_MIN`,
+`TRIM_THROTTLE`, `ARSPD_FBW_MIN/MAX`, `RLL2SRV_*`, and `PTCH2SRV_*`. These
+values are used only to adapt command limits and smoothing; the helper does not
+write parameters.
+
+The browser UI keeps quad and plane steering controls in separate panels. Quad
+mode exposes only body-velocity image-guidance fields. Plane mode exposes the
+fixed-wing crosshair-centering, pitch, and response-model fields, and only the
+plane command path receives those fixed-wing arguments.
 
 OpenCV's classic tracker API and the local template matcher do not provide a
 calibrated confidence score. The first milestone therefore maps a valid

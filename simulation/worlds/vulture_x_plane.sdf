@@ -178,6 +178,132 @@
           <geometry><box><size>1.2 2.4 0.03</size></box></geometry>
           <material><ambient>0.80 0.10 0.70 1</ambient><diffuse>0.80 0.10 0.70 1</diffuse></material>
         </visual>
+
+        <visual name="grass_blade_a01">
+          <pose>-6 -11 0.115 0 0 0.15</pose>
+          <geometry><box><size>0.10 1.40 0.08</size></box></geometry>
+          <material><ambient>0.12 0.34 0.13 1</ambient><diffuse>0.16 0.42 0.18 1</diffuse></material>
+        </visual>
+        <visual name="grass_blade_a02">
+          <pose>-4.3 -8.2 0.115 0 0 1.22</pose>
+          <geometry><box><size>0.12 1.10 0.08</size></box></geometry>
+          <material><ambient>0.18 0.40 0.14 1</ambient><diffuse>0.22 0.50 0.18 1</diffuse></material>
+        </visual>
+        <visual name="grass_blade_a03">
+          <pose>-2.1 -12.6 0.115 0 0 -0.70</pose>
+          <geometry><box><size>0.09 1.55 0.08</size></box></geometry>
+          <material><ambient>0.10 0.28 0.11 1</ambient><diffuse>0.13 0.36 0.14 1</diffuse></material>
+        </visual>
+        <visual name="grass_blade_a04">
+          <pose>0.4 -9.4 0.115 0 0 0.52</pose>
+          <geometry><box><size>0.11 1.30 0.08</size></box></geometry>
+          <material><ambient>0.24 0.38 0.16 1</ambient><diffuse>0.30 0.48 0.20 1</diffuse></material>
+        </visual>
+        <visual name="grass_blade_a05">
+          <pose>2.8 -13.1 0.115 0 0 -1.10</pose>
+          <geometry><box><size>0.10 1.05 0.08</size></box></geometry>
+          <material><ambient>0.14 0.32 0.12 1</ambient><diffuse>0.18 0.42 0.16 1</diffuse></material>
+        </visual>
+        <visual name="grass_blade_a06">
+          <pose>5.2 -10.5 0.115 0 0 0.94</pose>
+          <geometry><box><size>0.13 1.65 0.08</size></box></geometry>
+          <material><ambient>0.08 0.26 0.10 1</ambient><diffuse>0.12 0.34 0.13 1</diffuse></material>
+        </visual>
+        <visual name="grass_blade_a07">
+          <pose>7.9 -12.2 0.115 0 0 -0.28</pose>
+          <geometry><box><size>0.12 1.20 0.08</size></box></geometry>
+          <material><ambient>0.20 0.42 0.14 1</ambient><diffuse>0.25 0.52 0.18 1</diffuse></material>
+        </visual>
+        <visual name="grass_blade_a08">
+          <pose>10.7 -9.7 0.115 0 0 1.48</pose>
+          <geometry><box><size>0.10 1.45 0.08</size></box></geometry>
+          <material><ambient>0.12 0.31 0.13 1</ambient><diffuse>0.15 0.40 0.16 1</diffuse></material>
+        </visual>
+        <visual name="grass_blade_a09">
+          <pose>13.3 -13.4 0.115 0 0 0.33</pose>
+          <geometry><box><size>0.09 1.15 0.08</size></box></geometry>
+          <material><ambient>0.26 0.36 0.15 1</ambient><diffuse>0.32 0.46 0.19 1</diffuse></material>
+        </visual>
+        <visual name="grass_blade_a10">
+          <pose>16.1 -10.8 0.115 0 0 -1.42</pose>
+          <geometry><box><size>0.12 1.70 0.08</size></box></geometry>
+          <material><ambient>0.09 0.30 0.11 1</ambient><diffuse>0.13 0.39 0.14 1</diffuse></material>
+        </visual>
+        <visual name="grass_blade_b01">
+          <pose>-7.2 -5.6 0.115 0 0 -1.33</pose>
+          <geometry><box><size>0.11 1.35 0.08</size></box></geometry>
+          <material><ambient>0.16 0.36 0.12 1</ambient><diffuse>0.20 0.45 0.16 1</diffuse></material>
+        </visual>
+        <visual name="grass_blade_b02">
+          <pose>-4.8 -2.7 0.115 0 0 0.38</pose>
+          <geometry><box><size>0.10 1.20 0.08</size></box></geometry>
+          <material><ambient>0.22 0.40 0.16 1</ambient><diffuse>0.28 0.50 0.20 1</diffuse></material>
+        </visual>
+        <visual name="grass_blade_b03">
+          <pose>-1.5 -6.9 0.115 0 0 1.08</pose>
+          <geometry><box><size>0.13 1.60 0.08</size></box></geometry>
+          <material><ambient>0.10 0.27 0.10 1</ambient><diffuse>0.14 0.35 0.13 1</diffuse></material>
+        </visual>
+        <visual name="grass_blade_b04">
+          <pose>1.6 -3.9 0.115 0 0 -0.55</pose>
+          <geometry><box><size>0.09 1.05 0.08</size></box></geometry>
+          <material><ambient>0.18 0.39 0.14 1</ambient><diffuse>0.23 0.49 0.18 1</diffuse></material>
+        </visual>
+        <visual name="grass_blade_b05">
+          <pose>4.6 -7.4 0.115 0 0 0.77</pose>
+          <geometry><box><size>0.12 1.50 0.08</size></box></geometry>
+          <material><ambient>0.12 0.33 0.12 1</ambient><diffuse>0.17 0.43 0.16 1</diffuse></material>
+        </visual>
+        <visual name="grass_blade_b06">
+          <pose>8.1 -4.5 0.115 0 0 -1.05</pose>
+          <geometry><box><size>0.11 1.25 0.08</size></box></geometry>
+          <material><ambient>0.25 0.38 0.15 1</ambient><diffuse>0.31 0.48 0.19 1</diffuse></material>
+        </visual>
+        <visual name="grass_blade_b07">
+          <pose>11.4 -6.5 0.115 0 0 0.18</pose>
+          <geometry><box><size>0.10 1.75 0.08</size></box></geometry>
+          <material><ambient>0.08 0.24 0.09 1</ambient><diffuse>0.12 0.34 0.12 1</diffuse></material>
+        </visual>
+        <visual name="grass_blade_b08">
+          <pose>14.9 -3.1 0.115 0 0 1.36</pose>
+          <geometry><box><size>0.12 1.10 0.08</size></box></geometry>
+          <material><ambient>0.17 0.37 0.14 1</ambient><diffuse>0.21 0.46 0.18 1</diffuse></material>
+        </visual>
+        <visual name="grass_blade_b09">
+          <pose>18.2 -6.8 0.115 0 0 -0.42</pose>
+          <geometry><box><size>0.09 1.45 0.08</size></box></geometry>
+          <material><ambient>0.23 0.41 0.16 1</ambient><diffuse>0.29 0.51 0.20 1</diffuse></material>
+        </visual>
+        <visual name="grass_blade_c01">
+          <pose>-6.5 1.2 0.115 0 0 0.62</pose>
+          <geometry><box><size>0.12 1.30 0.08</size></box></geometry>
+          <material><ambient>0.11 0.30 0.12 1</ambient><diffuse>0.15 0.39 0.15 1</diffuse></material>
+        </visual>
+        <visual name="grass_blade_c02">
+          <pose>-3.0 4.3 0.115 0 0 -0.18</pose>
+          <geometry><box><size>0.09 1.15 0.08</size></box></geometry>
+          <material><ambient>0.20 0.43 0.15 1</ambient><diffuse>0.25 0.53 0.19 1</diffuse></material>
+        </visual>
+        <visual name="grass_blade_c03">
+          <pose>0.8 0.7 0.115 0 0 -1.28</pose>
+          <geometry><box><size>0.11 1.60 0.08</size></box></geometry>
+          <material><ambient>0.13 0.33 0.12 1</ambient><diffuse>0.18 0.43 0.16 1</diffuse></material>
+        </visual>
+        <visual name="grass_blade_c04">
+          <pose>3.9 3.8 0.115 0 0 1.12</pose>
+          <geometry><box><size>0.13 1.25 0.08</size></box></geometry>
+          <material><ambient>0.24 0.37 0.16 1</ambient><diffuse>0.30 0.47 0.20 1</diffuse></material>
+        </visual>
+        <visual name="grass_blade_c05">
+          <pose>7.2 1.1 0.115 0 0 -0.82</pose>
+          <geometry><box><size>0.10 1.70 0.08</size></box></geometry>
+          <material><ambient>0.09 0.27 0.10 1</ambient><diffuse>0.13 0.36 0.13 1</diffuse></material>
+        </visual>
+        <visual name="grass_blade_c06">
+          <pose>10.6 4.5 0.115 0 0 0.44</pose>
+          <geometry><box><size>0.12 1.35 0.08</size></box></geometry>
+          <material><ambient>0.19 0.39 0.14 1</ambient><diffuse>0.23 0.49 0.18 1</diffuse></material>
+        </visual>
       </link>
     </model>
 
@@ -374,26 +500,114 @@
     </include>
 
     <model name="target_marker">
-      <pose>12 -5 6.0 0 0 0</pose>
+      <pose degrees="true">32 -16 5.2 0 8 -25</pose>
       <static>true</static>
       <link name="link">
         <collision name="collision">
           <geometry>
             <box>
-              <size>0.2 1.6 1.0</size>
+              <size>0.08 10 10</size>
             </box>
           </geometry>
         </collision>
-        <visual name="bright_panel">
+        <visual name="magenta_tracking_banner">
           <geometry>
             <box>
-              <size>0.2 1.6 1.0</size>
+              <size>0.08 10 10</size>
             </box>
           </geometry>
           <material>
-            <ambient>1.0 0.1 0.05 1</ambient>
-            <diffuse>1.0 0.1 0.05 1</diffuse>
-            <emissive>0.5 0.02 0.01 1</emissive>
+            <ambient>1.0 0.0 0.85 1</ambient>
+            <diffuse>1.0 0.0 0.85 1</diffuse>
+            <emissive>0.45 0.0 0.35 1</emissive>
+          </material>
+        </visual>
+        <visual name="crosshair_horizontal">
+          <pose>-0.055 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.025 9.2 0.65</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.02 0.02 0.02 1</ambient>
+            <diffuse>0.02 0.02 0.02 1</diffuse>
+            <emissive>0.01 0.01 0.01 1</emissive>
+          </material>
+        </visual>
+        <visual name="crosshair_vertical">
+          <pose>-0.058 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.025 0.65 9.2</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.02 0.02 0.02 1</ambient>
+            <diffuse>0.02 0.02 0.02 1</diffuse>
+            <emissive>0.01 0.01 0.01 1</emissive>
+          </material>
+        </visual>
+        <visual name="x_mark_positive">
+          <pose>-0.061 0 0 0.785398 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.025 11.5 0.45</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.02 0.02 0.02 1</ambient>
+            <diffuse>0.02 0.02 0.02 1</diffuse>
+            <emissive>0.01 0.01 0.01 1</emissive>
+          </material>
+        </visual>
+        <visual name="x_mark_negative">
+          <pose>-0.064 0 0 -0.785398 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.025 11.5 0.45</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.02 0.02 0.02 1</ambient>
+            <diffuse>0.02 0.02 0.02 1</diffuse>
+            <emissive>0.01 0.01 0.01 1</emissive>
+          </material>
+        </visual>
+        <visual name="border_top">
+          <pose>-0.067 0 4.85 0 0 0</pose>
+          <geometry><box><size>0.025 10 0.3</size></box></geometry>
+          <material>
+            <ambient>0.02 0.02 0.02 1</ambient>
+            <diffuse>0.02 0.02 0.02 1</diffuse>
+            <emissive>0.01 0.01 0.01 1</emissive>
+          </material>
+        </visual>
+        <visual name="border_bottom">
+          <pose>-0.070 0 -4.85 0 0 0</pose>
+          <geometry><box><size>0.025 10 0.3</size></box></geometry>
+          <material>
+            <ambient>0.02 0.02 0.02 1</ambient>
+            <diffuse>0.02 0.02 0.02 1</diffuse>
+            <emissive>0.01 0.01 0.01 1</emissive>
+          </material>
+        </visual>
+        <visual name="border_left">
+          <pose>-0.073 -4.85 0 0 0 0</pose>
+          <geometry><box><size>0.025 0.3 10</size></box></geometry>
+          <material>
+            <ambient>0.02 0.02 0.02 1</ambient>
+            <diffuse>0.02 0.02 0.02 1</diffuse>
+            <emissive>0.01 0.01 0.01 1</emissive>
+          </material>
+        </visual>
+        <visual name="border_right">
+          <pose>-0.076 4.85 0 0 0 0</pose>
+          <geometry><box><size>0.025 0.3 10</size></box></geometry>
+          <material>
+            <ambient>0.02 0.02 0.02 1</ambient>
+            <diffuse>0.02 0.02 0.02 1</diffuse>
+            <emissive>0.01 0.01 0.01 1</emissive>
           </material>
         </visual>
       </link>

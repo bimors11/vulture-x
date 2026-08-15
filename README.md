@@ -225,8 +225,8 @@ scripts/run_ui.sh -plane
 
 By default the UI binds to `0.0.0.0`, prints both localhost and LAN URLs, opens
 Gazebo GUI and SITL in separate terminals when a terminal emulator is available,
-starts the camera bridge, and starts bounded random motion for the red Gazebo
-target. If no supported terminal emulator is found, Gazebo and SITL still start
+starts the camera bridge, and starts bounded motion for the Gazebo
+`target_marker`. If no supported terminal emulator is found, Gazebo and SITL still start
 with logs under `logs/ui/`.
 
 The UI reads heartbeat status from `udpin:0.0.0.0:14552` by default. Override it
@@ -246,35 +246,67 @@ Use `scripts/run_ui.sh --no-auto-start` to open only the web UI. Open the
 printed `vulture_x_ui_lan_url` from another device on the same network. Anyone
 who can reach that URL can operate the local SITL panel.
 
+The UI includes a plane-only `Plane Takeoff` button that runs the guarded
+FBWA/RC3-throttle/CIRCLE SITL helper. It is still an explicit operator action
+and is intended for local SITL only.
+
 The UI target mover changes only the simulated `target_marker` pose inside the
-existing test area. Steering still requires the drone to already be armed; the
-panel does not arm or take off. The steering section lets the operator choose
-orange-target tracking or a custom UI-selected target, set forward speed,
+existing test area. The quad target is a high-contrast orange UAV-shaped visual model
+and the default mover flies a fast loiter/circle pattern; the mover can also be
+run manually with `--pattern back_and_forth` for lateral passes. The plane target
+is a large 10 m by 10 m bright-magenta banner on an open grass area away from the runway
+and other scene objects. It has a dark center crosshair/X and is tilted slightly
+off-axis so the forward camera sees a stable high-contrast feature instead of a
+small jumping color blob. The plane profile does not autostart
+target motion, so the banner is a stable first lock target unless the operator
+explicitly presses `Move Target`. Steering still requires the drone to
+already be airborne; the steering action itself does not arm or take off. The
+steering section lets the operator choose banner tracking or a custom
+UI-selected target, set forward speed,
 vertical climb/descent speed, vertical image-error gain, and command rate for
 the timed SITL steering helper. For a custom target, drag a box on the camera
 frame, switch tracking mode to custom selection, and start steering. The camera
-view has a stream refresh FPS control so the browser can request frames faster
-than the once-per-second status poll.
+view has a stream refresh FPS control and a rendered center-box overlay so the
+operator can see whether the tracked target is being driven toward frame center.
+The overlay is drawn only on the served preview image after tracking has already
+read the source frame, so it does not become part of the selected ROI or detector
+input.
 
 The quad steering panel clamps forward speed to `5 m/s`, vertical speed to
 `5 m/s`, and vertical gain to `8.0`. The fixed-wing SITL steering path clamps
-ArduPlane guided airspeed to `25 m/s`, altitude slew rate to `10 m/s`, and
-vertical gain to `10.0`. These controls are aggressive simulation-only tuning
-knobs; the helper still requires the vehicle to already be armed, switches
-fixed-wing steering to `GUIDED`, and stops pursuit commands on target loss.
+ArduPlane guided airspeed to `20 m/s`, vertical speed to `10 m/s`, vertical gain
+to `80.0`, pitch to `40 degrees`, far-target pitch gain to `0.8`, near-target
+pitch gain to `3.0`, below-center pitch-down boost to `0.7`, pitch smoothing to
+`0.25`, and pitch change to `3 degrees` per camera update. Plane visual steering
+also sends a `20 m/s` airspeed target and uses an FBWA throttle governor with
+`0.55` cruise throttle, `0.25` minimum throttle, and `0.80` maximum throttle
+instead of holding throttle fixed during descents. These controls are
+simulation-only tuning knobs; the helper requires the vehicle to be airborne,
+switches fixed-wing steering to `FBWA` with bounded RC attitude overrides, and
+stops pursuit commands on target loss. Fixed-wing tracking uses
+perspective-corrected image error for roll/pitch centering, estimates target
+proximity from bounding-box apparent size, smooths sudden bbox jumps, filters
+pitch commands, and reduces throttle when measured airspeed rises above the
+target.
 
 The default quadcopter test world is at `simulation/worlds/vulture_x_test.sdf`. It contains
 an ArduPilot-controlled Iris-with-gimbal model from the ArduPilot Gazebo plugin,
-a forward camera provided by that model, a visible red target marker, and a
-simple open test area. The ground includes visual-only grid lines, colored
-patches, simple houses, a shed, and static vehicles so manual UI selections have
-trackable corners and texture instead of a flat same-color surface. The camera
-stream uses the plugin's GStreamer UDP path on `127.0.0.1:5600`.
+a forward 80 degree FOV camera provided by that model, a visible orange
+UAV-shaped target marker, and a simple open test area. The target colors are
+chosen for the current OpenCV color detector and manual template tracking path;
+no machine-learning training dataset or real aircraft detector is included. The
+ground includes visual-only grid lines, colored patches, simple houses, a shed,
+and static vehicles so manual UI selections have trackable corners and texture
+instead of a flat same-color surface. The camera stream uses the plugin's
+GStreamer UDP path on `127.0.0.1:5600`.
 
 The fixed-wing test world is `simulation/worlds/vulture_x_plane.sdf`. It reuses
-the same test area and target marker, swaps the vehicle include to
-the local `zephyr_with_camera` model, and streams camera video on the same UDP
-port for the UI bridge.
+the same test area, swaps the vehicle include to the local `zephyr_with_camera`
+model, uses a 70 degree forward camera FOV, and places a bright-magenta 10 m by
+10 m crosshair/X banner as the `target_marker` for the default banner detector. It
+adds dense low-profile grass feature strips around the tracking area for custom
+selection lock stability, and streams camera video on the same UDP port for the
+UI bridge.
 
 ## Continuing toward SITL
 

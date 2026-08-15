@@ -369,26 +369,115 @@
     </include>
 
     <model name="target_marker">
-      <pose>12 -5 6.0 0 0 0</pose>
+      <pose>12 -5 6.0 0 0 3.14159</pose>
       <static>true</static>
       <link name="link">
         <collision name="collision">
           <geometry>
             <box>
-              <size>0.2 1.6 1.0</size>
+              <size>1.8 2.6 0.55</size>
             </box>
           </geometry>
         </collision>
-        <visual name="bright_panel">
+        <visual name="fuselage">
+          <pose>0 0 0 0 1.5708 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.16</radius>
+              <length>1.8</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>1.0 0.18 0.03 1</ambient>
+            <diffuse>1.0 0.18 0.03 1</diffuse>
+            <emissive>0.45 0.05 0.01 1</emissive>
+          </material>
+        </visual>
+        <visual name="nose">
+          <pose>-0.98 0 0 0 0 0</pose>
+          <geometry>
+            <sphere>
+              <radius>0.22</radius>
+            </sphere>
+          </geometry>
+          <material>
+            <ambient>1.0 0.42 0.02 1</ambient>
+            <diffuse>1.0 0.42 0.02 1</diffuse>
+            <emissive>0.35 0.08 0.01 1</emissive>
+          </material>
+        </visual>
+        <visual name="main_wing">
           <geometry>
             <box>
-              <size>0.2 1.6 1.0</size>
+              <size>0.34 2.6 0.08</size>
             </box>
           </geometry>
           <material>
             <ambient>1.0 0.1 0.05 1</ambient>
             <diffuse>1.0 0.1 0.05 1</diffuse>
             <emissive>0.5 0.02 0.01 1</emissive>
+          </material>
+        </visual>
+        <visual name="tailplane">
+          <pose>0.74 0 0.02 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.26 0.95 0.06</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.95 0.12 0.03 1</ambient>
+            <diffuse>0.95 0.12 0.03 1</diffuse>
+            <emissive>0.35 0.02 0.01 1</emissive>
+          </material>
+        </visual>
+        <visual name="high_visibility_keel">
+          <pose>0.08 0 -0.22 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.12 0.85 0.36</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>1.0 0.08 0.02 1</ambient>
+            <diffuse>1.0 0.08 0.02 1</diffuse>
+            <emissive>0.55 0.02 0.01 1</emissive>
+          </material>
+        </visual>
+        <visual name="vertical_tail">
+          <pose>0.72 0 0.27 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.24 0.08 0.45</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.10 0.10 0.12 1</ambient>
+            <diffuse>0.10 0.10 0.12 1</diffuse>
+          </material>
+        </visual>
+        <visual name="left_wing_tip">
+          <pose>0 -1.35 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.20 0.14 0.10</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.05 0.05 0.05 1</ambient>
+            <diffuse>0.05 0.05 0.05 1</diffuse>
+          </material>
+        </visual>
+        <visual name="right_wing_tip">
+          <pose>0 1.35 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.20 0.14 0.10</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.05 0.05 0.05 1</ambient>
+            <diffuse>0.05 0.05 0.05 1</diffuse>
           </material>
         </visual>
       </link>
