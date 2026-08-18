@@ -33,6 +33,7 @@ def parse_mavlink_endpoint(endpoint: str) -> MavlinkEndpoint:
     allowed_prefixes = (
         "udpin:",
         "udpout:",
+        "udpcl:",
         "udp:",
         "tcp:",
         "tcpin:",
@@ -40,6 +41,8 @@ def parse_mavlink_endpoint(endpoint: str) -> MavlinkEndpoint:
         "mcast:",
     )
     if value.startswith(allowed_prefixes):
+        if value.startswith("udpcl:"):
+            return MavlinkEndpoint("udpout:" + value.removeprefix("udpcl:"))
         return MavlinkEndpoint(value)
 
     if value.startswith("/dev/"):
@@ -47,7 +50,7 @@ def parse_mavlink_endpoint(endpoint: str) -> MavlinkEndpoint:
 
     raise ValueError(
         "mavlink endpoint must be udpin:HOST:PORT, udpout:HOST:PORT, "
-        "tcp:HOST:PORT, or serial:DEVICE:BAUD"
+        "udpcl:HOST:PORT, tcp:HOST:PORT, or serial:DEVICE:BAUD"
     )
 
 

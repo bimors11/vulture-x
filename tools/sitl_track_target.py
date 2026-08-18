@@ -10,17 +10,28 @@ import os
 import signal
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
 import cv2
 from mavlink_endpoint import open_mavlink_connection
 from pymavlink import mavutil
-from track_camera_target import detect_red_target, newest_image, open_capture
+from track_camera_target import (
+    detect_banner_target,
+    detect_colored_target,
+    newest_image,
+    open_capture,
+)
 
-from vulture_x.vision.tracker import TemplateMatchingTracker, expand_bbox
+from vulture_x.vision.tracker import (
+    TemplateMatchingTracker,
+    expand_bbox,
+    refine_bbox_to_salient_region,
+)
 
 DEFAULT_MAVLINK = "udpin:0.0.0.0:14550"
+STABLE_FRAME_MIN_AGE_S = 0.02
 PLANE_TARGET_AIRSPEED_MPS = 20.0
 PLANE_CRUISE_THROTTLE = 0.55
 PLANE_RESPONSE_PARAM_NAMES = (
@@ -42,8 +53,22 @@ PLANE_RESPONSE_PARAM_NAMES = (
     "PTCH2SRV_D",
     "NAVL1_PERIOD",
     "NAVL1_DAMPING",
+    "RCMAP_ROLL",
     "RCMAP_PITCH",
+    "RCMAP_THROTTLE",
+    "RCMAP_YAW",
+    "RC1_REVERSED",
     "RC2_REVERSED",
+    "RC3_REVERSED",
+    "RC4_REVERSED",
+    "SERVO1_FUNCTION",
+    "SERVO2_FUNCTION",
+    "SERVO3_FUNCTION",
+    "SERVO4_FUNCTION",
+    "SERVO5_FUNCTION",
+    "SERVO6_FUNCTION",
+    "SERVO7_FUNCTION",
+    "SERVO8_FUNCTION",
 )
 
 
@@ -58,6 +83,10 @@ class PlaneResponseModel(NamedTuple):
     pitch_filter_alpha: float
     max_pitch_step_deg: float
     pitch_rc_reversed: bool
+    roll_channel: int
+    pitch_channel: int
+    throttle_channel: int
+    yaw_channel: int
     raw_params: dict[str, float]
 
 
@@ -74,7 +103,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--timeout-s", type=float, default=20.0)
     parser.add_argument("--min-area", type=float, default=25.0)
-    parser.add_argument("--rate-hz", type=float, default=10.0)
+    parser.add_argument("--rate-hz", type=float, default=30.0)
     parser.add_argument(
         "--vehicle",
         choices=("auto", "quad", "plane"),
@@ -205,6 +234,29 @@ def parse_args() -> argparse.Namespace:
         help="Bounded time to keep the last fixed-wing attitude command after target loss.",
     )
     parser.add_argument(
+        "--surface-test-min-deflection-deg",
+        type=float,
+        default=8.0,
+        help=(
+            "Plane surface-test only: minimum visible roll/pitch demand when the "
+            "tracked target is outside the image deadband."
+        ),
+    )
+    parser.add_argument(
+        "--surface-test-throttle",
+        type=float,
+        default=0.0,
+        help=(
+            "Plane surface-test throttle fraction. Keep the default at zero for "
+            "manual hardware tests; the simulator UI may raise this explicitly."
+        ),
+    )
+    parser.add_argument(
+        "--demand-state-file",
+        type=Path,
+        help="Optional JSON file updated every command cycle for UI demand overlays.",
+    )
+    parser.add_argument(
         "--plane-camera-hfov-deg",
         type=float,
         default=70.0,
@@ -259,6 +311,11 @@ def parse_args() -> argparse.Namespace:
         help="Per-parameter timeout for read-only plane parameter requests.",
     )
     parser.add_argument(
+        "--plane-param-cache-file",
+        type=Path,
+        help="Optional per-session plane parameter cache to skip repeated param reads.",
+    )
+    parser.add_argument(
         "--plane-lead-s",
         type=float,
         default=0.05,
@@ -284,11 +341,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-yaw-rate-deg-s", type=float, default=35.0)
     parser.add_argument(
         "--tracking-mode",
-        choices=("banner", "orange", "custom"),
-        default="banner",
+        choices=("banner", "red", "orange", "custom", "head", "person"),
+        default="red",
         help=(
-            "banner detects the Gazebo tracking banner; orange is a legacy alias; "
-            "custom tracks a UI-selected ROI."
+            "red detects a red/orange physical target; banner detects the Gazebo "
+            "tracking banner; orange is a legacy alias for red; custom/head track "
+            "a UI-selected ROI."
         ),
     )
     parser.add_argument("--selection-file", type=Path, default=None)
@@ -297,6 +355,14 @@ def parse_args() -> argparse.Namespace:
         "--enable-guidance",
         action="store_true",
         help="Required. Send bounded commands to local ArduPilot SITL.",
+    )
+    parser.add_argument(
+        "--surface-test",
+        action="store_true",
+        help=(
+            "Plane-only test: track the target in FBWA and move roll/pitch "
+            "surfaces. Throttle defaults to zero unless --surface-test-throttle is set."
+        ),
     )
     return parser.parse_args()
 
@@ -330,9 +396,25 @@ def create_tracker(tracker_name: str) -> object:
     )
 
 
+def create_manual_tracker(tracker_name: str) -> object:
+    if tracker_name == "TEMPLATE":
+        return TemplateMatchingTracker(
+            search_margin_px=80,
+            minimum_match_score=0.38,
+            template_update_alpha=0.06,
+            bbox_update_alpha=0.50,
+            max_center_jump_norm=0.18,
+            max_size_ratio=4.0,
+            scale_factors=(0.88, 0.95, 1.0, 1.06, 1.14),
+            grayscale=True,
+            foreground_refinement=False,
+        )
+    return create_tracker(tracker_name)
+
+
 def selection_bbox(selection_file: Path, frame: object) -> tuple[int, int, int, int]:
     raw = json.loads(selection_file.read_text(encoding="utf-8"))
-    if raw.get("mode") != "custom":
+    if raw.get("mode") not in {"custom", "head", "person"}:
         raise RuntimeError("custom selection mode is not enabled")
     frame_height, frame_width = frame.shape[:2]
     x = float(raw["x"]) * frame_width
@@ -347,7 +429,7 @@ def selection_bbox(selection_file: Path, frame: object) -> tuple[int, int, int, 
     )
     if bbox[0] + bbox[2] > frame_width or bbox[1] + bbox[3] > frame_height:
         raise RuntimeError("custom selection is outside the camera frame")
-    return bbox
+    return refine_bbox_to_salient_region(frame, bbox)
 
 
 class CustomSelectionTracker:
@@ -358,7 +440,7 @@ class CustomSelectionTracker:
         self._selection_mtime_ns: int | None = None
         self._smoothed_bbox: tuple[int, int, int, int] | None = None
         self._misses = 0
-        self._max_held_misses = 4
+        self._max_held_misses = 12
 
     def bbox(self, frame: object) -> tuple[int, int, int, int] | None:
         if not self._selection_file.exists():
@@ -366,7 +448,7 @@ class CustomSelectionTracker:
         mtime_ns = self._selection_file.stat().st_mtime_ns
         if self._tracker is None or mtime_ns != self._selection_mtime_ns:
             initial_bbox = selection_bbox(self._selection_file, frame)
-            tracker = create_tracker(self._tracker_name)
+            tracker = create_manual_tracker(self._tracker_name)
             if tracker.init(frame, initial_bbox) is False:
                 raise RuntimeError("OpenCV rejected the custom target selection")
             self._tracker = tracker
@@ -390,8 +472,8 @@ class CustomSelectionTracker:
             rounded_bbox,
             frame_width,
             frame_height,
-            max_center_jump_norm=0.08,
-            max_size_ratio=2.0,
+            max_center_jump_norm=0.14,
+            max_size_ratio=3.0,
         ):
             self._misses += 1
             if self._misses <= self._max_held_misses:
@@ -405,9 +487,9 @@ class CustomSelectionTracker:
             rounded_bbox,
             frame_width,
             frame_height,
-            alpha=0.22,
-            max_center_jump_norm=0.08,
-            max_size_ratio=2.0,
+            alpha=0.38,
+            max_center_jump_norm=0.14,
+            max_size_ratio=3.0,
         )
         return self._smoothed_bbox
 
@@ -415,9 +497,18 @@ class CustomSelectionTracker:
 class DetectorBackedTracker:
     """RDV-style detector initialization with OpenCV tracker updates."""
 
-    def __init__(self, tracker_name: str, min_area: float) -> None:
+    def __init__(
+        self,
+        tracker_name: str,
+        min_area: float,
+        detector: Callable[
+            [object, float],
+            tuple[int, int, int, int] | None,
+        ] = detect_colored_target,
+    ) -> None:
         self._tracker_name = tracker_name
         self._min_area = min_area
+        self._detector = detector
         self._tracker: object | None = None
         self._smoothed_bbox: tuple[int, int, int, int] | None = None
         self._misses = 0
@@ -427,7 +518,7 @@ class DetectorBackedTracker:
         if self._tracker is None:
             return self._detect_and_initialize(frame)
 
-        detector_bbox = detect_red_target(frame, self._min_area)
+        detector_bbox = self._detector(frame, self._min_area)
         detected, raw_bbox = self._tracker.update(frame)
         if detector_bbox is not None and self._is_detection_consistent(
             detector_bbox,
@@ -459,7 +550,7 @@ class DetectorBackedTracker:
         return None
 
     def _detect_and_initialize(self, frame: object) -> tuple[int, int, int, int] | None:
-        detected_bbox = detect_red_target(frame, self._min_area)
+        detected_bbox = self._detector(frame, self._min_area)
         if detected_bbox is None:
             return None
 
@@ -624,6 +715,7 @@ def verify_connection(
     args: argparse.Namespace,
 ) -> tuple[int, int, str]:
     timeout_s = float(args.timeout_s)
+    send_client_heartbeat(connection)
     heartbeat = connection.wait_heartbeat(timeout=timeout_s)
     if heartbeat is None:
         raise RuntimeError("no MAVLink heartbeat")
@@ -657,10 +749,20 @@ def verify_connection(
                 raise RuntimeError("fbwa_mode_timeout")
     elif mode != "GUIDED":
         raise RuntimeError(f"vehicle must already be in GUIDED mode, got {mode}")
-    if not armed:
+    if not armed and not args.surface_test:
         raise RuntimeError("vehicle must already be armed; this script will not arm")
 
     return connection.target_system, connection.target_component, vehicle
+
+
+def send_client_heartbeat(connection: mavutil.mavfile) -> None:
+    connection.mav.heartbeat_send(
+        mavutil.mavlink.MAV_TYPE_GCS,
+        mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+        0,
+        0,
+        0,
+    )
 
 
 def send_body_velocity(
@@ -1015,6 +1117,36 @@ def damp_pitch_command(
     return clamp(filtered, previous_pitch_deg - max_step, previous_pitch_deg + max_step)
 
 
+def enforce_visible_surface_deflection(
+    command_deg: float,
+    error: float,
+    min_deflection_deg: float,
+    limit_deg: float,
+    *,
+    invert_error_sign: bool = False,
+) -> float:
+    min_deflection_deg = max(0.0, min(min_deflection_deg, abs(limit_deg)))
+    if min_deflection_deg <= 0.0 or abs(error) <= 0.0:
+        return command_deg
+    direction = -math.copysign(1.0, error) if invert_error_sign else math.copysign(1.0, error)
+    if command_deg * direction >= 0.0 and abs(command_deg) >= min_deflection_deg:
+        return command_deg
+    return clamp(direction * min_deflection_deg, -abs(limit_deg), abs(limit_deg))
+
+
+def write_demand_state(path: Path | None, payload: dict[str, object]) -> None:
+    if path is None:
+        return
+    payload = {**payload, "updated_monotonic_s": time.monotonic(), "updated_unix_s": time.time()}
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        tmp_path.replace(path)
+    except OSError:
+        return
+
+
 def send_plane_rc_attitude(
     connection: mavutil.mavfile,
     roll_deg: float,
@@ -1023,6 +1155,10 @@ def send_plane_rc_attitude(
     max_pitch_deg: float,
     throttle: float,
     pitch_rc_reversed: bool = False,
+    roll_channel: int = 1,
+    pitch_channel: int = 2,
+    throttle_channel: int = 3,
+    yaw_channel: int = 4,
 ) -> None:
     roll_pwm, pitch_pwm, throttle_pwm, yaw_pwm = attitude_to_plane_rc_pwm(
         roll_deg,
@@ -1035,10 +1171,10 @@ def send_plane_rc_attitude(
     rc_override(
         connection,
         {
-            1: roll_pwm,
-            2: pitch_pwm,
-            3: throttle_pwm,
-            4: yaw_pwm,
+            roll_channel: roll_pwm,
+            pitch_channel: pitch_pwm,
+            throttle_channel: throttle_pwm,
+            yaw_channel: yaw_pwm,
         },
     )
 
@@ -1119,6 +1255,50 @@ def read_plane_parameters(
     return values
 
 
+def load_plane_param_cache(path: Path | None, mavlink_endpoint: str) -> dict[str, float] | None:
+    if path is None or not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if payload.get("mavlink") != mavlink_endpoint:
+        return None
+    raw_values = payload.get("values")
+    if not isinstance(raw_values, dict):
+        return None
+    values: dict[str, float] = {}
+    for name, value in raw_values.items():
+        if not isinstance(name, str):
+            continue
+        try:
+            values[name] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return values if values else None
+
+
+def save_plane_param_cache(
+    path: Path | None,
+    mavlink_endpoint: str,
+    values: dict[str, float],
+) -> None:
+    if path is None or not values:
+        return
+    payload = {
+        "mavlink": mavlink_endpoint,
+        "updated_unix_s": time.time(),
+        "values": values,
+    }
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        tmp_path.replace(path)
+    except OSError:
+        return
+
+
 def plane_response_model_from_params(
     args: argparse.Namespace,
     values: dict[str, float],
@@ -1167,11 +1347,13 @@ def plane_response_model_from_params(
             args.plane_max_pitch_step_deg,
         )
 
-    pitch_channel = round(values.get("RCMAP_PITCH", 2.0))
+    roll_channel = channel_from_param(values.get("RCMAP_ROLL", 1.0), 1)
+    pitch_channel = channel_from_param(values.get("RCMAP_PITCH", 2.0), 2)
+    throttle_channel = channel_from_param(values.get("RCMAP_THROTTLE", 3.0), 3)
+    yaw_channel = channel_from_param(values.get("RCMAP_YAW", 4.0), 4)
     pitch_rc_reversed = bool(
-        pitch_channel == 2
-        and "RC2_REVERSED" in values
-        and round(values["RC2_REVERSED"]) != 0
+        f"RC{pitch_channel}_REVERSED" in values
+        and round(values[f"RC{pitch_channel}_REVERSED"]) != 0
     )
 
     return PlaneResponseModel(
@@ -1185,8 +1367,30 @@ def plane_response_model_from_params(
         pitch_filter_alpha=pitch_filter_alpha,
         max_pitch_step_deg=max_pitch_step_deg,
         pitch_rc_reversed=pitch_rc_reversed,
+        roll_channel=roll_channel,
+        pitch_channel=pitch_channel,
+        throttle_channel=throttle_channel,
+        yaw_channel=yaw_channel,
         raw_params=values,
     )
+
+
+def channel_from_param(value: float | None, default: int) -> int:
+    if value is None:
+        return default
+    channel = round(value)
+    if channel < 1 or channel > 8:
+        return default
+    return channel
+
+
+def format_servo_functions(values: dict[str, float]) -> str:
+    items: list[str] = []
+    for channel in range(1, 9):
+        name = f"SERVO{channel}_FUNCTION"
+        if name in values:
+            items.append(f"{channel}:{round(values[name])}")
+    return ",".join(items) if items else "unknown"
 
 
 def read_plane_telemetry(
@@ -1200,11 +1404,15 @@ def read_plane_telemetry(
     relative_alt_m = last_relative_alt_m
     airspeed_mps = last_airspeed_mps
     while time.monotonic() < deadline:
-        message = connection.recv_match(
-            type=["VFR_HUD", "GLOBAL_POSITION_INT"],
-            blocking=True,
-            timeout=0.005,
-        )
+        try:
+            message = connection.recv_match(
+                type=["VFR_HUD", "GLOBAL_POSITION_INT"],
+                blocking=True,
+                timeout=0.005,
+            )
+        except (TypeError, OSError) as exc:
+            print(f"sitl_tracking_status=telemetry_skipped reason={type(exc).__name__}", flush=True)
+            return heading_deg, relative_alt_m, airspeed_mps
         if message is None:
             continue
         if message.get_type() == "VFR_HUD":
@@ -1238,6 +1446,66 @@ def frame_from_source(
     return capture.read()
 
 
+class FrameDirectoryReader:
+    def __init__(self, camera_dir: Path) -> None:
+        self._camera_dir = camera_dir
+        self._last_key: tuple[str, int, int] | None = None
+
+    def read(self) -> tuple[bool, object | None, float | None]:
+        image_path = newest_stable_image(self._camera_dir)
+        if image_path is None:
+            return False, None, None
+        try:
+            stat = image_path.stat()
+        except FileNotFoundError:
+            return False, None, None
+        key = (str(image_path), stat.st_mtime_ns, stat.st_size)
+        if key == self._last_key:
+            return False, None, time.time() - stat.st_mtime
+        frame = read_stable_image(image_path)
+        if frame is None:
+            return False, None, None
+        self._last_key = key
+        return True, frame, time.time() - stat.st_mtime
+
+
+def newest_stable_image(camera_dir: Path, *, now: float | None = None) -> Path | None:
+    now = time.time() if now is None else now
+    candidates: list[tuple[float, Path]] = []
+    for pattern in ("*.png", "*.jpg", "*.jpeg"):
+        for path in camera_dir.glob(pattern):
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                continue
+            if not path.is_file() or stat.st_size <= 0:
+                continue
+            if now - stat.st_mtime < STABLE_FRAME_MIN_AGE_S:
+                continue
+            candidates.append((stat.st_mtime, path))
+    if candidates:
+        return max(candidates, key=lambda item: item[0])[1]
+    return newest_image(camera_dir)
+
+
+def read_stable_image(image_path: Path) -> object | None:
+    last_size = -1
+    for _ in range(3):
+        try:
+            size = image_path.stat().st_size
+        except FileNotFoundError:
+            return None
+        if size <= 0:
+            time.sleep(0.01)
+            continue
+        frame = cv2.imread(str(image_path))
+        if frame is not None and size == last_size:
+            return frame
+        last_size = size
+        time.sleep(0.01)
+    return cv2.imread(str(image_path))
+
+
 def main() -> int:
     args = parse_args()
     if not args.enable_guidance:
@@ -1264,21 +1532,34 @@ def main() -> int:
     except RuntimeError as exc:
         print(f"sitl_tracking_status=failed reason={exc}", flush=True)
         return 1
+    if args.surface_test and vehicle != "plane":
+        print("sitl_tracking_status=failed reason=surface_test_requires_plane", flush=True)
+        return 2
+    surface_test_throttle = clamp(args.surface_test_throttle, 0.0, 0.80)
+    if args.surface_test:
+        print(
+            "sitl_tracking_status=surface_test "
+            f"vehicle=plane mode=fbwa throttle={surface_test_throttle:.2f}",
+            flush=True,
+        )
 
     capture = None if args.camera_dir else open_capture(args.pipeline or "")
     if capture is not None and not capture.isOpened():
         print("sitl_tracking_status=failed reason=camera_unavailable", flush=True)
         return 1
+    frame_reader = FrameDirectoryReader(args.camera_dir) if args.camera_dir is not None else None
 
     custom_tracker = None
+    tracking_mode = "red" if args.tracking_mode == "orange" else args.tracking_mode
     detector_tracker = None
-    if args.tracking_mode == "custom":
+    if tracking_mode in {"custom", "head", "person"}:
         if args.selection_file is None:
             print("sitl_tracking_status=failed reason=missing_custom_selection_file", flush=True)
             return 2
         custom_tracker = CustomSelectionTracker(args.tracker, args.selection_file)
     else:
-        detector_tracker = DetectorBackedTracker(args.tracker, args.min_area)
+        detector = detect_banner_target if tracking_mode == "banner" else detect_colored_target
+        detector_tracker = DetectorBackedTracker(args.tracker, args.min_area, detector)
 
     deadline = time.monotonic() + args.timeout_s
     period_s = 1.0 / args.rate_hz
@@ -1297,24 +1578,33 @@ def main() -> int:
     previous_pitch_command_deg: float | None = 0.0 if vehicle == "plane" else None
     throttle_report = 0.0
     pitch_gain_report = args.plane_pitch_gain_scale
+    frame_age_s: float | None = None
     proximity_report = 0.0
     control_scale_report = 1.0
     centering_gain_report = args.plane_centering_gain
     damping_gain_report = args.plane_damping_gain
     airspeed_report: float | None = None
+    roll_pwm_report = 1500
     pitch_pwm_report = 1500
+    throttle_pwm_report = 1000
     plane_response_model = plane_response_model_from_params(args, {})
     if vehicle == "plane":
         if args.read_plane_params:
-            param_values = read_plane_parameters(
-                connection,
-                target_system,
-                target_component,
-                timeout_per_param_s=args.plane_param_timeout_s,
-            )
+            param_values = load_plane_param_cache(args.plane_param_cache_file, args.mavlink)
+            param_source = "cache"
+            if param_values is None:
+                param_values = read_plane_parameters(
+                    connection,
+                    target_system,
+                    target_component,
+                    timeout_per_param_s=args.plane_param_timeout_s,
+                )
+                save_plane_param_cache(args.plane_param_cache_file, args.mavlink, param_values)
+                param_source = "mavlink"
             plane_response_model = plane_response_model_from_params(args, param_values)
+            param_status = "cached" if param_source == "cache" else "read"
             print(
-                "sitl_tracking_status=plane_params_read "
+                f"sitl_tracking_status=plane_params_{param_status} "
                 f"count={len(param_values)} "
                 f"max_roll_deg={plane_response_model.max_roll_deg:.2f} "
                 f"max_pitch_up_deg={plane_response_model.max_pitch_up_deg:.2f} "
@@ -1322,31 +1612,46 @@ def main() -> int:
                 f"target_airspeed_mps={plane_response_model.target_airspeed_mps:.2f} "
                 f"pitch_filter_alpha={plane_response_model.pitch_filter_alpha:.2f} "
                 f"max_pitch_step_deg={plane_response_model.max_pitch_step_deg:.2f} "
-                f"pitch_rc_reversed={int(plane_response_model.pitch_rc_reversed)}",
+                f"rcmap_roll={plane_response_model.roll_channel} "
+                f"rcmap_pitch={plane_response_model.pitch_channel} "
+                f"rcmap_throttle={plane_response_model.throttle_channel} "
+                f"rcmap_yaw={plane_response_model.yaw_channel} "
+                f"pitch_rc_reversed={int(plane_response_model.pitch_rc_reversed)} "
+                f"servo_functions={format_servo_functions(param_values)}",
                 flush=True,
             )
-        plane_heading_deg, plane_relative_alt_m, plane_airspeed_mps = read_plane_telemetry(
-            connection,
-            plane_heading_deg,
-            plane_relative_alt_m,
-            plane_airspeed_mps,
-        )
-        send_plane_speed(
-            connection,
-            target_system,
-            target_component,
-            plane_response_model.target_airspeed_mps,
-        )
-        throttle_report = plane_throttle_for_airspeed(
-            plane_airspeed_mps,
-            plane_response_model.target_airspeed_mps,
-            plane_response_model.cruise_throttle,
-            plane_response_model.min_throttle,
-            plane_response_model.max_throttle,
-            args.plane_throttle_airspeed_gain,
-            0.0,
-            max(plane_response_model.max_pitch_up_deg, plane_response_model.max_pitch_down_deg),
-        )
+        if args.surface_test:
+            plane_response_model = plane_response_model._replace(
+                pitch_filter_alpha=max(plane_response_model.pitch_filter_alpha, 0.55),
+                max_pitch_step_deg=max(plane_response_model.max_pitch_step_deg, 6.0),
+            )
+            args.plane_max_roll_step_deg = max(args.plane_max_roll_step_deg, 8.0)
+        if not args.surface_test:
+            plane_heading_deg, plane_relative_alt_m, plane_airspeed_mps = read_plane_telemetry(
+                connection,
+                plane_heading_deg,
+                plane_relative_alt_m,
+                plane_airspeed_mps,
+            )
+        if not args.surface_test:
+            send_plane_speed(
+                connection,
+                target_system,
+                target_component,
+                plane_response_model.target_airspeed_mps,
+            )
+            throttle_report = plane_throttle_for_airspeed(
+                plane_airspeed_mps,
+                plane_response_model.target_airspeed_mps,
+                plane_response_model.cruise_throttle,
+                plane_response_model.min_throttle,
+                plane_response_model.max_throttle,
+                args.plane_throttle_airspeed_gain,
+                0.0,
+                max(plane_response_model.max_pitch_up_deg, plane_response_model.max_pitch_down_deg),
+            )
+        else:
+            throttle_report = surface_test_throttle
         airspeed_report = plane_airspeed_mps
         send_plane_rc_attitude(
             connection,
@@ -1356,13 +1661,34 @@ def main() -> int:
             max(plane_response_model.max_pitch_up_deg, plane_response_model.max_pitch_down_deg),
             throttle_report,
             plane_response_model.pitch_rc_reversed,
+            plane_response_model.roll_channel,
+            plane_response_model.pitch_channel,
+            plane_response_model.throttle_channel,
+            plane_response_model.yaw_channel,
+        )
+        roll_pwm_report, pitch_pwm_report, throttle_pwm_report, _yaw_pwm = (
+            attitude_to_plane_rc_pwm(
+                0.0,
+                0.0,
+                plane_response_model.max_roll_deg,
+                max(
+                    plane_response_model.max_pitch_up_deg,
+                    plane_response_model.max_pitch_down_deg,
+                ),
+                throttle_report,
+                pitch_rc_reversed=plane_response_model.pitch_rc_reversed,
+            )
         )
 
     try:
         while running and time.monotonic() < deadline:
-            ok, frame = frame_from_source(capture, args.camera_dir)
+            if frame_reader is not None:
+                ok, frame, frame_age_s = frame_reader.read()
+            else:
+                ok, frame = frame_from_source(capture, args.camera_dir)
+                frame_age_s = None
             if not ok or frame is None:
-                time.sleep(0.05)
+                time.sleep(min(0.05, period_s / 2.0))
                 continue
 
             frames += 1
@@ -1393,12 +1719,13 @@ def main() -> int:
                         )
                     )
                     airspeed_report = plane_airspeed_mps
-                    send_plane_speed(
-                        connection,
-                        target_system,
-                        target_component,
-                        plane_response_model.target_airspeed_mps,
-                    )
+                    if not args.surface_test:
+                        send_plane_speed(
+                            connection,
+                            target_system,
+                            target_component,
+                            plane_response_model.target_airspeed_mps,
+                        )
                     hold_age_s = (
                         float("inf") if last_detection_time is None else now - last_detection_time
                     )
@@ -1410,19 +1737,22 @@ def main() -> int:
                     if not hold_attitude:
                         previous_roll_command_deg = 0.0
                         previous_pitch_command_deg = 0.0
-                        throttle_report = plane_throttle_for_airspeed(
-                            plane_airspeed_mps,
-                            plane_response_model.target_airspeed_mps,
-                            plane_response_model.cruise_throttle,
-                            plane_response_model.min_throttle,
-                            plane_response_model.max_throttle,
-                            args.plane_throttle_airspeed_gain,
-                            0.0,
-                            max(
-                                plane_response_model.max_pitch_up_deg,
-                                plane_response_model.max_pitch_down_deg,
-                            ),
-                        )
+                        if args.surface_test:
+                            throttle_report = surface_test_throttle
+                        else:
+                            throttle_report = plane_throttle_for_airspeed(
+                                plane_airspeed_mps,
+                                plane_response_model.target_airspeed_mps,
+                                plane_response_model.cruise_throttle,
+                                plane_response_model.min_throttle,
+                                plane_response_model.max_throttle,
+                                args.plane_throttle_airspeed_gain,
+                                0.0,
+                                max(
+                                    plane_response_model.max_pitch_up_deg,
+                                    plane_response_model.max_pitch_down_deg,
+                                ),
+                            )
                     send_plane_rc_attitude(
                         connection,
                         previous_roll_command_deg,
@@ -1434,8 +1764,17 @@ def main() -> int:
                         ),
                         throttle_report,
                         plane_response_model.pitch_rc_reversed,
+                        plane_response_model.roll_channel,
+                        plane_response_model.pitch_channel,
+                        plane_response_model.throttle_channel,
+                        plane_response_model.yaw_channel,
                     )
-                    _roll_pwm, pitch_pwm_report, _throttle_pwm, _yaw_pwm = attitude_to_plane_rc_pwm(
+                    (
+                        roll_pwm_report,
+                        pitch_pwm_report,
+                        throttle_pwm_report,
+                        _yaw_pwm,
+                    ) = attitude_to_plane_rc_pwm(
                         previous_roll_command_deg,
                         previous_pitch_command_deg,
                         plane_response_model.max_roll_deg,
@@ -1446,17 +1785,43 @@ def main() -> int:
                         throttle_report,
                         pitch_rc_reversed=plane_response_model.pitch_rc_reversed,
                     )
+                    write_demand_state(
+                        args.demand_state_file,
+                        {
+                            "detected": False,
+                            "mode": tracking_mode,
+                            "vehicle": vehicle,
+                            "surface_test": args.surface_test,
+                            "loss_behavior": "holding_last_attitude",
+                            "roll_deg": previous_roll_command_deg,
+                            "pitch_deg": previous_pitch_command_deg,
+                            "roll_pwm": roll_pwm_report,
+                            "pitch_pwm": pitch_pwm_report,
+                            "throttle_pwm": throttle_pwm_report,
+                            "max_roll_deg": plane_response_model.max_roll_deg,
+                            "max_pitch_deg": max(
+                                plane_response_model.max_pitch_up_deg,
+                                plane_response_model.max_pitch_down_deg,
+                            ),
+                            "rate_hz": args.rate_hz,
+                            "frame_age_ms": (
+                                frame_age_s * 1000.0 if frame_age_s is not None else None
+                            ),
+                        },
+                    )
                 if now - last_report >= 1.0:
+                    frame_age_ms = frame_age_s * 1000.0 if frame_age_s is not None else -1.0
                     loss_behavior = (
                         "holding_last_attitude"
                         if vehicle == "plane" and hold_attitude
                         else "neutral_search"
                     )
                     print(
-                        f"sitl_tracking_status=searching mode={args.tracking_mode} "
+                        f"sitl_tracking_status=searching mode={tracking_mode} "
                         "reason=target_not_detected "
                         f"loss_behavior={loss_behavior} "
-                        f"loss_hold_s={args.plane_loss_hold_s:.2f}",
+                        f"loss_hold_s={args.plane_loss_hold_s:.2f} "
+                        f"frame_age_ms={frame_age_ms:.0f}",
                         flush=True,
                     )
                     last_report = now
@@ -1546,12 +1911,17 @@ def main() -> int:
                     yaw_rate,
                 )
             else:
-                plane_heading_deg, plane_relative_alt_m, plane_airspeed_mps = read_plane_telemetry(
-                    connection,
-                    plane_heading_deg,
-                    plane_relative_alt_m,
-                    plane_airspeed_mps,
-                )
+                if not args.surface_test:
+                    (
+                        plane_heading_deg,
+                        plane_relative_alt_m,
+                        plane_airspeed_mps,
+                    ) = read_plane_telemetry(
+                        connection,
+                        plane_heading_deg,
+                        plane_relative_alt_m,
+                        plane_airspeed_mps,
+                    )
                 far_scale = far_target_control_scale(
                     target_proximity,
                     args.plane_far_control_scale,
@@ -1583,6 +1953,13 @@ def main() -> int:
                     plane_response_model.pitch_filter_alpha,
                     args.plane_max_roll_step_deg,
                 )
+                if args.surface_test:
+                    roll_deg = enforce_visible_surface_deflection(
+                        roll_deg,
+                        guided_error_x,
+                        args.surface_test_min_deflection_deg,
+                        plane_response_model.max_roll_deg,
+                    )
                 previous_roll_command_deg = roll_deg
                 pitch_deg = plane_pitch_command(
                     guided_error_y,
@@ -1608,6 +1985,17 @@ def main() -> int:
                     plane_response_model.pitch_filter_alpha,
                     plane_response_model.max_pitch_step_deg,
                 )
+                if args.surface_test:
+                    pitch_deg = enforce_visible_surface_deflection(
+                        pitch_deg,
+                        guided_error_y,
+                        args.surface_test_min_deflection_deg,
+                        max(
+                            plane_response_model.max_pitch_up_deg,
+                            plane_response_model.max_pitch_down_deg,
+                        ),
+                        invert_error_sign=True,
+                    )
                 previous_pitch_command_deg = pitch_deg
                 pitch_gain_report = adaptive_pitch_gain(
                     args.plane_pitch_gain_scale,
@@ -1615,28 +2003,32 @@ def main() -> int:
                     target_proximity,
                 )
                 proximity_report = target_proximity
-                throttle_report = plane_throttle_for_airspeed(
-                    plane_airspeed_mps,
-                    plane_response_model.target_airspeed_mps,
-                    plane_response_model.cruise_throttle,
-                    plane_response_model.min_throttle,
-                    plane_response_model.max_throttle,
-                    args.plane_throttle_airspeed_gain,
-                    pitch_deg,
-                    max(
-                        plane_response_model.max_pitch_up_deg,
-                        plane_response_model.max_pitch_down_deg,
-                    ),
-                    target_proximity,
-                    args.plane_near_throttle_reduction,
-                )
+                if args.surface_test:
+                    throttle_report = surface_test_throttle
+                else:
+                    throttle_report = plane_throttle_for_airspeed(
+                        plane_airspeed_mps,
+                        plane_response_model.target_airspeed_mps,
+                        plane_response_model.cruise_throttle,
+                        plane_response_model.min_throttle,
+                        plane_response_model.max_throttle,
+                        args.plane_throttle_airspeed_gain,
+                        pitch_deg,
+                        max(
+                            plane_response_model.max_pitch_up_deg,
+                            plane_response_model.max_pitch_down_deg,
+                        ),
+                        target_proximity,
+                        args.plane_near_throttle_reduction,
+                    )
                 airspeed_report = plane_airspeed_mps
-                send_plane_speed(
-                    connection,
-                    target_system,
-                    target_component,
-                    plane_response_model.target_airspeed_mps,
-                )
+                if not args.surface_test:
+                    send_plane_speed(
+                        connection,
+                        target_system,
+                        target_component,
+                        plane_response_model.target_airspeed_mps,
+                    )
                 pitch_report = pitch_deg
                 roll_report = roll_deg
                 send_plane_rc_attitude(
@@ -1650,8 +2042,17 @@ def main() -> int:
                     ),
                     throttle_report,
                     plane_response_model.pitch_rc_reversed,
+                    plane_response_model.roll_channel,
+                    plane_response_model.pitch_channel,
+                    plane_response_model.throttle_channel,
+                    plane_response_model.yaw_channel,
                 )
-                _roll_pwm, pitch_pwm_report, _throttle_pwm, _yaw_pwm = attitude_to_plane_rc_pwm(
+                (
+                    roll_pwm_report,
+                    pitch_pwm_report,
+                    throttle_pwm_report,
+                    _yaw_pwm,
+                ) = attitude_to_plane_rc_pwm(
                     roll_deg,
                     pitch_deg,
                     plane_response_model.max_roll_deg,
@@ -1662,19 +2063,53 @@ def main() -> int:
                     throttle_report,
                     pitch_rc_reversed=plane_response_model.pitch_rc_reversed,
                 )
+                write_demand_state(
+                    args.demand_state_file,
+                    {
+                        "detected": True,
+                        "mode": tracking_mode,
+                        "vehicle": vehicle,
+                        "surface_test": args.surface_test,
+                        "bbox": [x, y, width, height],
+                        "center_x": center_x,
+                        "center_y": center_y,
+                        "guided_error_x": guided_error_x,
+                        "guided_error_y": guided_error_y,
+                        "roll_deg": roll_deg,
+                        "pitch_deg": pitch_deg,
+                        "roll_pwm": roll_pwm_report,
+                        "pitch_pwm": pitch_pwm_report,
+                        "throttle_pwm": throttle_pwm_report,
+                        "max_roll_deg": plane_response_model.max_roll_deg,
+                        "max_pitch_deg": max(
+                            plane_response_model.max_pitch_up_deg,
+                            plane_response_model.max_pitch_down_deg,
+                        ),
+                        "rate_hz": args.rate_hz,
+                        "frame_age_ms": frame_age_s * 1000.0 if frame_age_s is not None else None,
+                        "target_proximity": target_proximity,
+                    },
+                )
             last_command = now
 
             if now - last_report >= 1.0:
+                frame_age_ms = frame_age_s * 1000.0 if frame_age_s is not None else -1.0
                 print(
                     "sitl_tracking_status=commanding "
                     f"vehicle={vehicle} "
-                    f"mode={args.tracking_mode} "
+                    f"mode={tracking_mode} "
                     f"center={center_x:.3f},{center_y:.3f} "
                     f"vel_body_frd={forward_mps:.2f},{right_mps:.2f},{down_mps:.2f} "
                     f"yaw_rate_deg_s={yaw_rate:.2f} "
                     f"roll_deg={roll_report:.2f} "
                     f"pitch_deg={pitch_report:.2f} "
+                    f"roll_pwm={roll_pwm_report} "
                     f"pitch_pwm={pitch_pwm_report} "
+                    f"throttle_pwm={throttle_pwm_report} "
+                    f"rcmap={plane_response_model.roll_channel},"
+                    f"{plane_response_model.pitch_channel},"
+                    f"{plane_response_model.throttle_channel},"
+                    f"{plane_response_model.yaw_channel} "
                     f"pitch_rc_reversed={int(plane_response_model.pitch_rc_reversed)} "
                     f"guided_error={guided_error_x:.3f},{guided_error_y:.3f} "
                     f"target_proximity={proximity_report:.2f} "
@@ -1687,9 +2122,12 @@ def main() -> int:
                     f"near_throttle_reduction={args.plane_near_throttle_reduction:.2f} "
                     f"pitch_filter_alpha={plane_response_model.pitch_filter_alpha:.2f} "
                     f"pitch_step_deg={plane_response_model.max_pitch_step_deg:.2f} "
+                    f"surface_min_deflection_deg={args.surface_test_min_deflection_deg:.2f} "
+                    f"frame_age_ms={frame_age_ms:.0f} "
                     f"airspeed_mps={airspeed_report if airspeed_report is not None else -1.0:.2f} "
                     f"target_airspeed_mps={plane_response_model.target_airspeed_mps:.2f} "
                     f"throttle={throttle_report:.2f} "
+                    f"surface_test={int(args.surface_test)} "
                     f"control=fbwa_rc",
                     flush=True,
                 )

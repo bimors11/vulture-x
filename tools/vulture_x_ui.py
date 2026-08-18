@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
 import os
 import shlex
 import shutil
@@ -25,20 +26,46 @@ from urllib.parse import parse_qs, urlparse
 import cv2
 from mavlink_endpoint import open_mavlink_connection, parse_mavlink_endpoint
 from pymavlink import mavutil
-from track_camera_target import detect_red_target, newest_image
+from track_camera_target import (
+    detect_banner_target,
+    detect_colored_target,
+    detect_heads,
+    newest_image,
+)
 
-from vulture_x.vision.tracker import TemplateMatchingTracker
+from vulture_x.vision.tracker import (
+    TemplateMatchingTracker,
+    clamp_bbox,
+    refine_bbox_to_salient_region,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LOG_DIR = REPO_ROOT / "logs" / "ui"
 CAMERA_DIR = LOG_DIR / "camera_frames"
 SELECTION_PATH = LOG_DIR / "custom_selection.json"
-DEFAULT_MAVLINK_ENDPOINT = os.environ.get("VULTURE_X_MAVLINK", "udpin:0.0.0.0:14550")
+DEMAND_STATE_PATH = LOG_DIR / "tracking_demand.json"
+PLANE_PARAM_CACHE_PATH = LOG_DIR / "plane_params_cache.json"
+HEAD_DETECTION_MAX_WIDTH = 420
+SIM_MAVLINK_ENDPOINT = os.environ.get(
+    "VULTURE_X_SIM_MAVLINK",
+    os.environ.get("VULTURE_X_MAVLINK", "udpin:0.0.0.0:14550"),
+)
+MANUAL_MAVLINK_ENDPOINT = os.environ.get(
+    "VULTURE_X_MANUAL_MAVLINK",
+    os.environ.get("VULTURE_X_MAVLINK", "udpcl:192.168.144.12:19856"),
+)
+DEFAULT_MAVLINK_ENDPOINT = MANUAL_MAVLINK_ENDPOINT
 MAVLINK_STATUS_ENDPOINT = os.environ.get("VULTURE_X_UI_MAVLINK", "udpin:0.0.0.0:14552")
-DEFAULT_VIDEO_SOURCE = os.environ.get("VULTURE_X_VIDEO_SOURCE", "udp")
-DEFAULT_RTSP_URL = os.environ.get("VULTURE_X_RTSP_URL", "")
+SIM_VIDEO_SOURCE = os.environ.get("VULTURE_X_SIM_VIDEO_SOURCE", "udp")
+MANUAL_VIDEO_SOURCE = os.environ.get("VULTURE_X_MANUAL_VIDEO_SOURCE", "rtsp")
+DEFAULT_VIDEO_SOURCE = os.environ.get("VULTURE_X_VIDEO_SOURCE", MANUAL_VIDEO_SOURCE)
+DEFAULT_RTSP_URL = os.environ.get("VULTURE_X_RTSP_URL", "rtsp://192.168.144.25:8554/main.264")
+DEFAULT_RTSP_LATENCY_MS = os.environ.get("VULTURE_X_RTSP_LATENCY_MS", "50")
+DEFAULT_RTSP_PROTOCOLS = os.environ.get("VULTURE_X_RTSP_PROTOCOLS", "tcp")
+DEFAULT_RTSP_MAX_RATE = os.environ.get("VULTURE_X_RTSP_MAX_RATE", "30")
 MAVLINK_STALE_AFTER_S = 3.5
 FRESH_FRAME_MAX_AGE_S = 3.0
+STABLE_FRAME_MIN_AGE_S = 0.02
 MAX_GUIDED_FORWARD_MPS = 5.0
 MAX_GUIDED_VERTICAL_MPS = 5.0
 MAX_FIXED_WING_FORWARD_MPS = 20.0
@@ -61,7 +88,10 @@ DEFAULT_FIXED_WING_PITCH_FILTER_ALPHA = 0.25
 DEFAULT_FIXED_WING_MAX_PITCH_STEP_DEG = 2.0
 DEFAULT_FIXED_WING_MAX_ROLL_STEP_DEG = 3.0
 DEFAULT_FIXED_WING_LOSS_HOLD_S = 1.5
+DEFAULT_SIM_SURFACE_TEST_THROTTLE = 0.80
 CAMERA_STREAM_ENABLE_RETRY_S = (0.0, 1.0, 2.5, 5.0, 8.0)
+CAMERA_START_WAIT_S = 5.0
+HEAD_DETECTION_CACHE: dict[str, object] = {"key": None, "heads": []}
 
 
 class VehicleProfile(NamedTuple):
@@ -447,13 +477,26 @@ HTML = r"""<!doctype html>
       <section>
         <h2>Quick Actions</h2>
         <div class="top-actions">
-          <button class="primary" onclick="steer()">Steer Target</button>
-          <button class="secondary" onclick="connectMavlink()">Connect MAVLink</button>
-          <button class="secondary" onclick="connectVideo()">Connect Video</button>
-        </div>
-        <div class="controls">
+          <button class="primary" onclick="connectVideo()">Connect Video</button>
+          <button id="surface-test-btn" class="secondary" onclick="surfaceTest()">
+            Surface Test
+          </button>
           <button class="danger" onclick="post('/api/stop_steering')">Stop Steering</button>
-          <button onclick="takeoff()">Plane Takeoff</button>
+        </div>
+        <div id="sim-actions" class="environment-controls" hidden>
+          <button onclick="post('/api/start_gazebo')">Start Gazebo</button>
+          <button onclick="post('/api/start_sitl')">Start SITL</button>
+          <button onclick="connectMavlink()">Connect MAVLink</button>
+          <button
+            id="takeoff-btn"
+            class="secondary"
+            onclick="post('/api/start_takeoff?mavlink=' + mavlinkEndpoint())"
+          >
+            Plane Takeoff
+          </button>
+          <button onclick="post('/api/start_target_motion')">Start Target</button>
+          <button onclick="post('/api/stop_target_motion')">Stop Target</button>
+          <button onclick="post('/api/clear_camera_cache')">Clear Camera</button>
         </div>
       </section>
       <section>
@@ -464,41 +507,22 @@ HTML = r"""<!doctype html>
         <h2>Connections</h2>
         <div class="connection-grid">
           <label>Control MAVLink endpoint
-            <input id="mavlink-endpoint" value="udpin:0.0.0.0:14550">
+            <input id="mavlink-endpoint" value="udpcl:192.168.144.12:19856">
           </label>
-          <button class="secondary" onclick="connectMavlink()">Connect</button>
         </div>
-        <div class="connection-grid">
-          <label>Video source
-            <select id="video-source">
-              <option value="udp" selected>UDP 5600</option>
-              <option value="rtsp">RTSP</option>
-            </select>
-          </label>
-          <button class="secondary" onclick="connectVideo()">Connect</button>
-        </div>
-        <label>RTSP URL
-          <input id="rtsp-url" placeholder="rtsp://127.0.0.1:8554/stream">
+        <label id="rtsp-url-label">RTSP URL
+          <input id="rtsp-url" value="rtsp://192.168.144.25:8554/main.264">
         </label>
       </section>
       <section>
-        <h2>Environment</h2>
-        <div class="environment-controls">
-          <button onclick="post('/api/start_gazebo')">Start Gazebo</button>
-          <button onclick="post('/api/start_sitl')">Start SITL</button>
-          <button onclick="post('/api/start_target_motion')">Move Target</button>
-          <button onclick="post('/api/stop_target_motion')">Stop Target</button>
-          <button onclick="post('/api/clear_camera_cache')">Clear Camera</button>
-          <button class="danger" onclick="post('/api/stop_all')">Stop All</button>
-        </div>
-      </section>
-      <section>
-        <h2>Target Steering</h2>
+        <h2>Target</h2>
         <div class="mode-row">
-          <label>Tracking mode
+          <label>Tracking
             <select id="tracking-mode">
-              <option value="banner" selected>Banner target</option>
-              <option value="custom">Custom selection</option>
+              <option value="red" selected>Red object</option>
+              <option value="head">Head/Face</option>
+              <option value="custom">Manual box</option>
+              <option value="banner">Sim banner</option>
             </select>
           </label>
           <label>Selection
@@ -515,7 +539,7 @@ HTML = r"""<!doctype html>
               <input id="quad-forward-speed" type="number" min="0" max="8" step="0.1" value="3.0">
             </label>
             <label>Command rate Hz
-              <input id="quad-command-rate" type="number" min="1" max="20" step="1" value="10">
+              <input id="quad-command-rate" type="number" min="1" max="60" step="1" value="30">
             </label>
             <label>Vertical speed m/s
               <input id="quad-vertical-speed" type="number" min="0" max="3" step="0.1" value="3.0">
@@ -531,8 +555,8 @@ HTML = r"""<!doctype html>
           <label>Forward speed m/s
             <input id="plane-forward-speed" type="number" min="0" max="20" step="0.1" value="20.0">
           </label>
-          <label>Command rate Hz
-            <input id="plane-command-rate" type="number" min="1" max="20" step="1" value="10">
+          <label>Tracking Hz
+            <input id="plane-command-rate" type="number" min="1" max="60" step="1" value="30">
           </label>
           <label>Vertical speed m/s
             <input id="plane-vertical-speed" type="number" min="0" max="10" step="0.1" value="10.0">
@@ -613,7 +637,7 @@ HTML = r"""<!doctype html>
       <section>
         <h2>Camera Target View</h2>
         <label>Stream refresh FPS
-          <input id="stream-fps" type="number" min="1" max="30" step="1" value="12">
+          <input id="stream-fps" type="number" min="1" max="60" step="1" value="30">
         </label>
         <div class="camera-stage" id="camera-stage">
           <img id="camera" src="/api/frame.jpg" alt="camera frame" draggable="false">
@@ -634,18 +658,18 @@ HTML = r"""<!doctype html>
   </main>
   <script>
     let currentVehicleMode = 'quad';
+    let currentVideoSource = 'rtsp';
     function activeNumber(id, fallback) {
       const element = document.getElementById(id);
       return encodeURIComponent(element ? (element.value || fallback) : fallback);
     }
     function mavlinkEndpoint() {
       const element = document.getElementById('mavlink-endpoint');
-      const fallback = 'udpin:0.0.0.0:14550';
+      const fallback = 'udpcl:192.168.144.12:19856';
       return encodeURIComponent(element ? (element.value || fallback) : fallback);
     }
     function videoSource() {
-      const element = document.getElementById('video-source');
-      return encodeURIComponent(element ? (element.value || 'udp') : 'udp');
+      return currentVideoSource || 'rtsp';
     }
     function rtspUrl() {
       const element = document.getElementById('rtsp-url');
@@ -657,15 +681,25 @@ HTML = r"""<!doctype html>
       refresh(data);
     }
     async function steer() {
+      await startSteering(false);
+    }
+    async function surfaceTest() {
+      await startSteering(true);
+    }
+    async function startSteering(surfaceTestMode) {
       const duration = encodeURIComponent(document.getElementById('duration').value || '20');
-      const mode = encodeURIComponent(document.getElementById('tracking-mode').value || 'banner');
+      const trackingModeInput = document.getElementById('tracking-mode');
+      const defaultMode = 'red';
+      const mode = encodeURIComponent(
+        trackingModeInput ? (trackingModeInput.value || defaultMode) : defaultMode
+      );
       const isPlane = currentVehicleMode === 'plane';
       const speed = isPlane
         ? activeNumber('plane-forward-speed', '20.0')
         : activeNumber('quad-forward-speed', '3.0');
-      const rate = isPlane
-        ? activeNumber('plane-command-rate', '10')
-        : activeNumber('quad-command-rate', '10');
+      let rate = isPlane
+        ? activeNumber('plane-command-rate', '30')
+        : activeNumber('quad-command-rate', '30');
       const verticalSpeed = isPlane
         ? activeNumber('plane-vertical-speed', '10.0')
         : activeNumber('quad-vertical-speed', '3.0');
@@ -679,7 +713,8 @@ HTML = r"""<!doctype html>
         '&rate_hz=' + rate +
         '&max_down_mps=' + verticalSpeed +
         '&vertical_gain=' + verticalGain +
-        '&tracking_mode=' + mode;
+        '&tracking_mode=' + mode +
+        '&surface_test=' + (surfaceTestMode ? '1' : '0');
       if (isPlane) {
         path +=
           '&plane_centering_gain=' + activeNumber('plane-centering-gain', '1.15') +
@@ -697,9 +732,6 @@ HTML = r"""<!doctype html>
           '&plane_loss_hold_s=' + activeNumber('plane-loss-hold', '1.5');
       }
       await post(path);
-    }
-    async function takeoff() {
-      await post('/api/start_takeoff?mavlink=' + mavlinkEndpoint());
     }
     async function connectMavlink() {
       await post('/api/connect_mavlink?mavlink=' + mavlinkEndpoint());
@@ -725,40 +757,46 @@ HTML = r"""<!doctype html>
           data.vehicle.label,
           data.vehicle.mode === 'quad' || data.vehicle.mode === 'plane'
         ),
-        row('Gazebo', data.processes.gazebo ? 'running' : 'stopped', data.processes.gazebo),
-        row('SITL', data.processes.sitl ? 'running' : 'stopped', data.processes.sitl),
         row('Camera Bridge', data.processes.bridge ? 'running' : 'stopped', data.processes.bridge),
-        row('Video Input', data.video.source.toUpperCase(), data.camera.live),
         row(
-          'Target Motion',
-          data.processes.target_motion ? 'running' : 'stopped',
-          data.processes.target_motion
+          'Video Input',
+          data.video.input_label || data.video.source.toUpperCase(),
+          data.camera.live
         ),
+        ...(data.runtime.simulator ? [
+          row('Gazebo', data.processes.gazebo ? 'running' : 'stopped', data.processes.gazebo),
+          row('SITL', data.processes.sitl ? 'running' : 'stopped', data.processes.sitl),
+          row(
+            'Target Motion',
+            data.processes.target_motion ? 'running' : 'idle',
+            true
+          ),
+          row('Takeoff', data.processes.takeoff ? 'running' : 'idle', true),
+        ] : []),
         row('Live Frames', data.camera.live ? 'live' : 'stale', data.camera.live),
-        row('Takeoff', data.processes.takeoff ? 'running' : 'idle', !data.processes.takeoff),
-        row(
-          'MAVLink',
-          data.mavlink.connected ? data.mavlink.mode : 'offline',
-          data.mavlink.connected
-        ),
-        row('Armed', data.mavlink.armed ? 'armed' : 'not armed', data.mavlink.armed),
         row('Target', target, data.target.detected),
         row('Steering', data.processes.steering ? 'running' : 'idle', !data.processes.steering),
       ].join('');
       currentVehicleMode = data.vehicle.mode;
+      currentVideoSource = data.video.source || currentVideoSource;
       document.getElementById('quad-fields').hidden = currentVehicleMode !== 'quad';
       document.getElementById('plane-fields').hidden = currentVehicleMode !== 'plane';
+      document.getElementById('surface-test-btn').hidden = currentVehicleMode !== 'plane';
+      document.getElementById('sim-actions').hidden = !data.runtime.simulator;
+      document.getElementById('takeoff-btn').hidden = currentVehicleMode !== 'plane';
       const endpointInput = document.getElementById('mavlink-endpoint');
       if (endpointInput && document.activeElement !== endpointInput) {
         endpointInput.value = data.mavlink.control_endpoint || endpointInput.value;
       }
-      const videoSourceInput = document.getElementById('video-source');
-      if (videoSourceInput && document.activeElement !== videoSourceInput) {
-        videoSourceInput.value = data.video.source || videoSourceInput.value;
-      }
       const rtspUrlInput = document.getElementById('rtsp-url');
       if (rtspUrlInput && document.activeElement !== rtspUrlInput) {
         rtspUrlInput.value = data.video.rtsp_url || rtspUrlInput.value;
+      }
+      const rtspLabel = document.getElementById('rtsp-url-label');
+      if (rtspLabel && rtspUrlInput) {
+        const isRtsp = data.video.source === 'rtsp';
+        rtspLabel.hidden = !isRtsp;
+        rtspUrlInput.disabled = !isRtsp;
       }
       document.getElementById('steer-log').textContent = data.logs.steering;
       const selectionText = data.selection.enabled
@@ -773,7 +811,8 @@ HTML = r"""<!doctype html>
         (owners ? '\n\nUDP 5600:\n' + owners : '');
     }
     function refreshFrame() {
-      document.getElementById('camera').src = '/api/frame.jpg?t=' + Date.now();
+      const mode = encodeURIComponent(document.getElementById('tracking-mode').value || 'red');
+      document.getElementById('camera').src = '/api/frame.jpg?mode=' + mode + '&t=' + Date.now();
     }
     async function saveSelection(selection) {
       const response = await fetch('/api/selection', {
@@ -787,7 +826,15 @@ HTML = r"""<!doctype html>
     async function clearSelection() {
       const response = await fetch('/api/selection/clear', {method: 'POST'});
       refresh(await response.json());
-      document.getElementById('tracking-mode').value = 'banner';
+      document.getElementById('tracking-mode').value = 'red';
+    }
+    async function selectHeadAt(point) {
+      const content = imageContentRect();
+      const x = clampUnit((point.x - content.left) / content.width);
+      const y = clampUnit((point.y - content.top) / content.height);
+      const response = await fetch('/api/selection/head?x=' + x + '&y=' + y, {method: 'POST'});
+      refresh(await response.json());
+      document.getElementById('tracking-mode').value = 'head';
     }
     function imageContentRect() {
       const img = document.getElementById('camera');
@@ -856,6 +903,12 @@ HTML = r"""<!doctype html>
       stage.addEventListener('pointerup', async (event) => {
         if (!dragging || !start) return;
         dragging = false;
+        const distance = Math.hypot(event.clientX - start.x, event.clientY - start.y);
+        const mode = document.getElementById('tracking-mode').value || 'red';
+        if (mode === 'head' && distance < 8) {
+          await selectHeadAt({x: event.clientX, y: event.clientY});
+          return;
+        }
         const content = imageContentRect();
         const x1 = clampUnit((start.x - content.left) / content.width);
         const y1 = clampUnit((start.y - content.top) / content.height);
@@ -877,7 +930,7 @@ HTML = r"""<!doctype html>
     function streamPeriodMs() {
       const fps = Math.max(
         1,
-        Math.min(30, Number(document.getElementById('stream-fps').value || '12'))
+        Math.min(60, Number(document.getElementById('stream-fps').value || '30'))
       );
       return Math.round(1000 / fps);
     }
@@ -888,7 +941,8 @@ HTML = r"""<!doctype html>
     });
     async function poll() {
       try {
-        const response = await fetch('/api/status');
+        const mode = encodeURIComponent(document.getElementById('tracking-mode').value || 'red');
+        const response = await fetch('/api/status?mode=' + mode);
         refresh(await response.json());
       } catch (error) {
         document.getElementById('system-log').textContent = String(error);
@@ -984,27 +1038,28 @@ class UiSelectionTracker:
         self._selection_mtime_ns: int | None = None
         self._last_frame_key: tuple[str, int] | None = None
         self._last_bbox: tuple[int, int, int, int] | None = None
+        self._last_frame_shape: tuple[int, int] | None = None
+        self._misses = 0
+        self._max_held_misses = 12
 
     def reset(self) -> None:
         self._tracker = None
         self._selection_mtime_ns = None
         self._last_frame_key = None
         self._last_bbox = None
+        self._last_frame_shape = None
+        self._misses = 0
 
     def payload(self) -> dict[str, float | bool | str] | None:
-        if self._last_bbox is None:
+        if self._last_bbox is None or self._last_frame_shape is None:
             return None
-        frame = newest_image(active_camera_dir() or CAMERA_DIR)
-        if frame is None:
-            return None
-        image = cv2.imread(str(frame))
-        if image is None:
-            return None
-        frame_height, frame_width = image.shape[:2]
+        selection = load_selection()
+        mode = str(selection.get("mode", "custom")) if selection is not None else "custom"
+        frame_height, frame_width = self._last_frame_shape
         x, y, width, height = self._last_bbox
         return {
             "enabled": True,
-            "mode": "custom",
+            "mode": mode,
             "tracking": "locked",
             "x": x / frame_width,
             "y": y / frame_height,
@@ -1028,7 +1083,10 @@ class UiSelectionTracker:
             return self._last_bbox
 
         if self._tracker is None or self._selection_mtime_ns != selection_mtime_ns:
-            bbox = normalized_selection_to_bbox(selection, frame)
+            bbox = refine_bbox_to_salient_region(
+                frame,
+                normalized_selection_to_bbox(selection, frame),
+            )
             tracker = create_cv_tracker(self._tracker_name)
             if tracker.init(frame, bbox) is False:
                 self.reset()
@@ -1037,44 +1095,80 @@ class UiSelectionTracker:
             self._selection_mtime_ns = selection_mtime_ns
             self._last_frame_key = frame_key
             self._last_bbox = bbox
+            self._last_frame_shape = frame.shape[:2]
+            self._misses = 0
             return bbox
 
         detected, raw_bbox = self._tracker.update(frame)
         self._last_frame_key = frame_key
         if not detected:
-            self._last_bbox = None
+            self._misses += 1
+            if self._last_bbox is not None and self._misses <= self._max_held_misses:
+                self._last_frame_shape = frame.shape[:2]
+                return self._last_bbox
+            self._tracker = None
+            self._last_frame_shape = frame.shape[:2]
             return None
-        self._last_bbox = tuple(round(value) for value in raw_bbox)
+        frame_height, frame_width = frame.shape[:2]
+        self._misses = 0
+        self._last_bbox = clamp_bbox(
+            tuple(round(value) for value in raw_bbox),
+            frame_width,
+            frame_height,
+        )
+        self._last_frame_shape = frame.shape[:2]
         return self._last_bbox
 
 
 def camera_bridge_command(video_source: str, rtsp_url: str) -> list[str]:
     sink = [
         "!",
+        "queue",
+        "leaky=downstream",
+        "max-size-buffers=1",
+        "max-size-time=0",
+        "max-size-bytes=0",
+        "!",
         "videoconvert",
         "!",
         "jpegenc",
+        "quality=55",
         "!",
         "multifilesink",
         f"location={CAMERA_DIR}/frame-%06d.jpg",
-        "max-files=60",
+        "max-files=10",
+        "sync=false",
+        "async=false",
     ]
     if video_source == "rtsp":
         url = rtsp_url.strip()
         if not url.startswith(("rtsp://", "rtsps://")):
             raise ValueError("rtsp_url_required")
+        try:
+            latency_ms = max(0, min(500, int(DEFAULT_RTSP_LATENCY_MS)))
+        except ValueError as exc:
+            raise ValueError("invalid_rtsp_latency_ms") from exc
+        protocols = DEFAULT_RTSP_PROTOCOLS.strip().lower()
+        if protocols not in {"tcp", "udp"}:
+            raise ValueError("invalid_rtsp_protocols")
+        try:
+            max_rate = max(1, min(60, int(DEFAULT_RTSP_MAX_RATE)))
+        except ValueError as exc:
+            raise ValueError("invalid_rtsp_max_rate") from exc
         return [
             "gst-launch-1.0",
             "-q",
-            "rtspsrc",
-            f"location={url}",
-            "latency=100",
+            "uridecodebin",
+            f"uri={url}",
+            f"source::latency={latency_ms}",
+            "source::drop-on-latency=true",
+            "source::do-retransmission=false",
+            f"source::protocols={protocols}",
             "!",
-            "rtph264depay",
-            "!",
-            "h264parse",
-            "!",
-            "avdec_h264",
+            "videorate",
+            "drop-only=true",
+            "skip-to-first=true",
+            f"max-rate={max_rate}",
             *sink,
         ]
     if video_source != "udp":
@@ -1101,6 +1195,7 @@ class AppState:
         CAMERA_DIR.mkdir(parents=True, exist_ok=True)
         self.profile = profile or VEHICLE_PROFILES[DEFAULT_VEHICLE_MODE]
         self.lock = threading.Lock()
+        self.simulator_mode = False
         self.mavlink_endpoint = DEFAULT_MAVLINK_ENDPOINT
         self.video_source = (
             DEFAULT_VIDEO_SOURCE if DEFAULT_VIDEO_SOURCE in {"udp", "rtsp"} else "udp"
@@ -1187,6 +1282,7 @@ class AppState:
                 source_component=203,
                 autoreconnect=False,
             )
+            send_client_heartbeat(connection)
             heartbeat = connection.wait_heartbeat(timeout=timeout_s)
         except Exception as exc:
             return f"mavlink connect failed reason={exc}"
@@ -1221,6 +1317,19 @@ class AppState:
             *profile.target_motion_args,
         ]
 
+    def configure_runtime_io(self, *, simulator: bool) -> None:
+        self.simulator_mode = simulator
+        if simulator:
+            self.mavlink_endpoint = SIM_MAVLINK_ENDPOINT
+            self.video_source = SIM_VIDEO_SOURCE if SIM_VIDEO_SOURCE in {"udp", "rtsp"} else "udp"
+            self.rtsp_url = ""
+            return
+        self.mavlink_endpoint = MANUAL_MAVLINK_ENDPOINT
+        self.video_source = (
+            MANUAL_VIDEO_SOURCE if MANUAL_VIDEO_SOURCE in {"udp", "rtsp"} else "rtsp"
+        )
+        self.rtsp_url = DEFAULT_RTSP_URL
+
     def remember(self, message: str) -> None:
         self.messages.append(f"{time.strftime('%H:%M:%S')} {message}")
         self.messages = self.messages[-30:]
@@ -1247,6 +1356,7 @@ class AppState:
         plane_loss_hold_s: float,
         tracking_mode: str,
         mavlink_endpoint: str | None = None,
+        surface_test: bool = False,
     ) -> str:
         if mavlink_endpoint is None:
             mavlink_endpoint = self.mavlink_endpoint
@@ -1256,9 +1366,11 @@ class AppState:
             return f"steering blocked reason={exc}"
         if not self.profile.steering_supported:
             return "steering blocked reason=fixed_wing_guidance_not_implemented"
+        if surface_test and self.profile.mode != "plane":
+            return "steering blocked reason=surface_test_requires_plane"
         duration_s = max(3.0, min(120.0, duration_s))
         forward_mps = max(0.0, min(self.profile.max_forward_mps, forward_mps))
-        rate_hz = max(1.0, min(20.0, rate_hz))
+        rate_hz = max(1.0, min(60.0, rate_hz))
         max_down_mps = max(0.0, min(self.profile.max_vertical_mps, max_down_mps))
         vertical_gain = max(0.0, min(self.profile.max_vertical_gain, vertical_gain))
         plane_centering_gain = max(0.0, min(4.0, plane_centering_gain))
@@ -1274,15 +1386,27 @@ class AppState:
         plane_max_pitch_step_deg = max(1.0, min(8.0, plane_max_pitch_step_deg))
         plane_max_roll_step_deg = max(1.0, min(10.0, plane_max_roll_step_deg))
         plane_loss_hold_s = max(0.0, min(5.0, plane_loss_hold_s))
+        if surface_test:
+            plane_pitch_filter_alpha = max(plane_pitch_filter_alpha, 0.55)
+            plane_max_pitch_step_deg = max(plane_max_pitch_step_deg, 6.0)
+            plane_max_roll_step_deg = max(plane_max_roll_step_deg, 8.0)
+            plane_loss_hold_s = min(plane_loss_hold_s, 0.25)
         if tracking_mode == "orange":
-            tracking_mode = "banner"
-        if tracking_mode not in {"banner", "custom"}:
+            tracking_mode = "red"
+        if tracking_mode == "person":
+            tracking_mode = "head"
+        if tracking_mode not in {"banner", "red", "custom", "head"}:
             return "steering blocked reason=invalid_tracking_mode"
-        if tracking_mode == "custom" and load_selection() is None:
+        if tracking_mode in {"custom", "head"} and load_selection() is None:
             return "steering blocked reason=missing_custom_selection"
+        with contextlib.suppress(FileNotFoundError):
+            DEMAND_STATE_PATH.unlink()
         camera_dir = active_camera_dir()
         if camera_dir is None:
-            return "no camera frames available; start camera first"
+            ready_message = self.ensure_camera_ready()
+            camera_dir = active_camera_dir()
+            if camera_dir is None:
+                return f"steering blocked reason=stale_camera detail={ready_message}"
         self.steering.command = [
             sys.executable,
             "tools/sitl_track_target.py",
@@ -1305,6 +1429,10 @@ class AppState:
             str(vertical_gain),
             "--tracking-mode",
             tracking_mode,
+            "--demand-state-file",
+            str(DEMAND_STATE_PATH),
+            "--plane-param-cache-file",
+            str(PLANE_PARAM_CACHE_PATH),
         ]
         if self.profile.mode == "plane":
             self.steering.command.extend(
@@ -1337,9 +1465,28 @@ class AppState:
                     str(plane_loss_hold_s),
                 ]
             )
-        if tracking_mode == "custom":
+            if surface_test:
+                self.steering.command.append("--surface-test")
+                if self.simulator_mode:
+                    self.steering.command.extend(
+                        ["--surface-test-throttle", str(DEFAULT_SIM_SURFACE_TEST_THROTTLE)]
+                    )
+        if tracking_mode in {"custom", "head"}:
             self.steering.command.extend(["--selection-file", str(SELECTION_PATH)])
         return self.steering.start()
+
+    def ensure_camera_ready(self) -> str:
+        if active_camera_dir() is not None:
+            return "camera live"
+        if camera_bridge_running(self.bridge):
+            self.bridge.stop()
+        message = self.start_bridge(self.video_source, self.rtsp_url)
+        deadline = time.monotonic() + CAMERA_START_WAIT_S
+        while time.monotonic() < deadline:
+            if active_camera_dir() is not None:
+                return f"camera restarted detail={message}"
+            time.sleep(0.1)
+        return f"camera restart timeout detail={message}"
 
     def start_takeoff(self, mavlink_endpoint: str | None = None) -> str:
         if mavlink_endpoint is None:
@@ -1391,6 +1538,8 @@ class AppState:
         if camera_bridge_running(self.bridge):
             return "camera bridge already running"
         CAMERA_DIR.mkdir(parents=True, exist_ok=True)
+        clear_camera_frames()
+        self.selection_tracker.reset()
         message = self.bridge.start()
         if video_source == "udp":
             schedule_camera_streaming_retries()
@@ -1426,6 +1575,7 @@ class AppState:
             r"move_gazebo_target.py",
             r"gst-launch-1.0 .*port=5600",
             r"gst-launch-1.0 .*rtspsrc",
+            r"gst-launch-1.0 .*uridecodebin .*rtsp",
             r"arducopter --model JSON",
             r"arduplane --model JSON",
             r"sim_vehicle.py .*gazebo-iris",
@@ -1491,6 +1641,7 @@ def camera_bridge_running(bridge: ManagedProcess) -> bool:
         bridge.running()
         or process_running(r"gst-launch-1.0 .*port=5600")
         or process_running(r"gst-launch-1.0 .*rtspsrc")
+        or process_running(r"gst-launch-1.0 .*uridecodebin .*rtsp")
     )
 
 
@@ -1548,6 +1699,17 @@ def udp_port_conflicts(port: int) -> list[str]:
     return conflicts
 
 
+def clear_camera_frames() -> int:
+    removed = 0
+    for image_path in CAMERA_DIR.glob("frame-*"):
+        try:
+            image_path.unlink()
+            removed += 1
+        except FileNotFoundError:
+            continue
+    return removed
+
+
 def load_selection() -> dict[str, float | bool | str] | None:
     if not SELECTION_PATH.exists():
         return None
@@ -1555,7 +1717,8 @@ def load_selection() -> dict[str, float | bool | str] | None:
         raw = json.loads(SELECTION_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    if raw.get("mode") != "custom":
+    mode = "head" if raw.get("mode") == "person" else raw.get("mode")
+    if mode not in {"custom", "head"}:
         return None
     try:
         x = float(raw["x"])
@@ -1568,7 +1731,7 @@ def load_selection() -> dict[str, float | bool | str] | None:
         return None
     return {
         "enabled": True,
-        "mode": "custom",
+        "mode": str(mode),
         "x": x,
         "y": y,
         "width": width,
@@ -1579,7 +1742,7 @@ def load_selection() -> dict[str, float | bool | str] | None:
 def selection_payload() -> dict[str, float | bool | str]:
     selection = load_selection()
     if selection is None:
-        return {"enabled": False, "mode": "banner", "x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0}
+        return {"enabled": False, "mode": "red", "x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0}
     tracked = STATE.selection_tracker.payload()
     return tracked or {**selection, "tracking": "initializing"}
 
@@ -1602,7 +1765,17 @@ def normalized_selection_to_bbox(
 
 def create_cv_tracker(tracker_name: str) -> Any:
     if tracker_name == "TEMPLATE":
-        return TemplateMatchingTracker()
+        return TemplateMatchingTracker(
+            search_margin_px=80,
+            minimum_match_score=0.38,
+            template_update_alpha=0.06,
+            bbox_update_alpha=0.50,
+            max_center_jump_norm=0.18,
+            max_size_ratio=4.0,
+            scale_factors=(0.88, 0.95, 1.0, 1.06, 1.14),
+            grayscale=True,
+            foreground_refinement=False,
+        )
     direct_factory = getattr(cv2, f"Tracker{tracker_name}_create", None)
     if direct_factory is not None:
         return direct_factory()
@@ -1627,8 +1800,11 @@ def save_selection(raw: dict[str, Any]) -> str:
         return "selection rejected reason=selection_too_small"
     if x < 0 or y < 0 or x + width > 1 or y + height > 1:
         return "selection rejected reason=selection_outside_frame"
+    mode = "head" if raw.get("mode", "custom") == "person" else raw.get("mode", "custom")
+    if mode not in {"custom", "head"}:
+        return "selection rejected reason=invalid_mode"
     payload = {
-        "mode": "custom",
+        "mode": mode,
         "x": x,
         "y": y,
         "width": width,
@@ -1637,7 +1813,102 @@ def save_selection(raw: dict[str, Any]) -> str:
     }
     SELECTION_PATH.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     STATE.selection_tracker.reset()
-    return "custom selection saved"
+    return f"{mode} selection saved"
+
+
+def current_camera_frame() -> tuple[Any | None, Path | None]:
+    camera_dir = active_camera_dir()
+    if camera_dir is None:
+        return None, None
+    image_path = newest_stable_image(camera_dir)
+    if image_path is None:
+        return None, None
+    return read_camera_frame(image_path), image_path
+
+
+def cached_heads(frame: Any, image_path: Path) -> list[tuple[int, int, int, int]]:
+    try:
+        frame_key = (str(image_path), image_path.stat().st_mtime_ns)
+    except FileNotFoundError:
+        return []
+    if HEAD_DETECTION_CACHE.get("key") == frame_key:
+        cached = HEAD_DETECTION_CACHE.get("heads")
+        if isinstance(cached, list):
+            return cached
+    heads = detect_heads(frame, max_width=HEAD_DETECTION_MAX_WIDTH)
+    HEAD_DETECTION_CACHE["key"] = frame_key
+    HEAD_DETECTION_CACHE["heads"] = heads
+    return heads
+
+
+def normalized_bbox_from_pixels(
+    bbox: tuple[int, int, int, int],
+    frame: Any,
+) -> dict[str, float | str]:
+    frame_height, frame_width = frame.shape[:2]
+    x, y, width, height = bbox
+    return {
+        "mode": "head",
+        "x": x / frame_width,
+        "y": y / frame_height,
+        "width": width / frame_width,
+        "height": height / frame_height,
+    }
+
+
+def select_head_at(x_norm: float, y_norm: float) -> str:
+    if not math.isfinite(x_norm) or not math.isfinite(y_norm):
+        return "head selection rejected reason=invalid_point"
+    if x_norm < 0 or y_norm < 0 or x_norm > 1 or y_norm > 1:
+        return "head selection rejected reason=point_outside_frame"
+    frame, _image_path = current_camera_frame()
+    if frame is None:
+        return "head selection rejected reason=no_camera_frame"
+    frame_height, frame_width = frame.shape[:2]
+    point_x = x_norm * frame_width
+    point_y = y_norm * frame_height
+    heads = cached_heads(frame, _image_path) if _image_path is not None else []
+    if not heads:
+        fallback_width = max(24, round(frame_width * 0.08))
+        fallback_height = max(24, round(fallback_width * 1.15))
+        chosen = (
+            round(point_x - fallback_width / 2.0),
+            round(point_y - fallback_height / 2.0),
+            fallback_width,
+            fallback_height,
+        )
+        chosen = clamp_bbox(chosen, frame_width, frame_height)
+        message = save_selection(normalized_bbox_from_pixels(chosen, frame))
+        if message.endswith("selection saved"):
+            return "head selection saved heads_detected=0 fallback=click_roi"
+        return message
+
+    containing = [
+        bbox
+        for bbox in heads
+        if bbox[0] <= point_x <= bbox[0] + bbox[2] and bbox[1] <= point_y <= bbox[1] + bbox[3]
+    ]
+    if containing:
+        chosen = min(containing, key=lambda bbox: bbox[2] * bbox[3])
+    else:
+        frame_diag = max(
+            1.0,
+            float((frame_width * frame_width + frame_height * frame_height) ** 0.5),
+        )
+        scored = []
+        for bbox in heads:
+            center_x = bbox[0] + bbox[2] / 2.0
+            center_y = bbox[1] + bbox[3] / 2.0
+            distance = ((center_x - point_x) ** 2 + (center_y - point_y) ** 2) ** 0.5
+            scored.append((distance / frame_diag, bbox))
+        distance_norm, chosen = min(scored, key=lambda item: item[0])
+        if distance_norm > 0.12:
+            return "head selection rejected reason=no_head_near_click"
+
+    message = save_selection(normalized_bbox_from_pixels(chosen, frame))
+    if message.endswith("selection saved"):
+        return f"{message} heads_detected={len(heads)}"
+    return message
 
 
 def enable_gazebo_camera_streaming() -> None:
@@ -1655,7 +1926,7 @@ def enable_gazebo_camera_streaming() -> None:
     ] or [
         "/world/vulture_x_test/model/iris_with_gimbal/model/gimbal/link/"
         "pitch_link/sensor/camera/image/enable_streaming",
-        "/world/vulture_x_test/model/zephyr_with_camera/link/"
+        "/world/vulture_x_plane/model/zephyr_with_camera/link/"
         "fixed_wing_camera_link/sensor/camera/image/enable_streaming",
     ]
     for topic in topics:
@@ -1696,34 +1967,107 @@ def active_camera_dir() -> Path | None:
     return newest[1] if newest else None
 
 
+def newest_stable_image(camera_dir: Path, *, now: float | None = None) -> Path | None:
+    now = time.time() if now is None else now
+    candidates: list[tuple[float, Path]] = []
+    for pattern in ("*.png", "*.jpg", "*.jpeg"):
+        for path in camera_dir.glob(pattern):
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                continue
+            if not path.is_file() or stat.st_size <= 0:
+                continue
+            if now - stat.st_mtime < STABLE_FRAME_MIN_AGE_S:
+                continue
+            candidates.append((stat.st_mtime, path))
+    if not candidates:
+        return newest_image(camera_dir)
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def read_camera_frame(image_path: Path) -> Any | None:
+    last_size = -1
+    for _ in range(3):
+        try:
+            size = image_path.stat().st_size
+        except FileNotFoundError:
+            return None
+        if size <= 0:
+            time.sleep(0.01)
+            continue
+        frame = cv2.imread(str(image_path))
+        if frame is not None and size == last_size:
+            return frame
+        last_size = size
+        time.sleep(0.01)
+    return cv2.imread(str(image_path))
+
+
 def mavlink_status() -> dict[str, Any]:
     status = MAVLINK_MONITOR.snapshot()
     status["control_endpoint"] = STATE.mavlink_endpoint
     return status
 
 
-def latest_target() -> tuple[dict[str, Any], bytes | None]:
+def send_client_heartbeat(connection: mavutil.mavfile) -> None:
+    connection.mav.heartbeat_send(
+        mavutil.mavlink.MAV_TYPE_GCS,
+        mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+        0,
+        0,
+        0,
+    )
+
+
+def latest_target(display_mode: str = "red") -> tuple[dict[str, Any], bytes | None]:
+    if display_mode not in {"red", "banner", "custom", "head", "person"}:
+        display_mode = "red"
     camera_dir = active_camera_dir()
     if camera_dir is None:
         return {"detected": False, "detail": "no camera frame"}, None
     image_path = newest_image(camera_dir)
     if image_path is None:
         return {"detected": False, "detail": "no camera frame"}, None
-    frame = cv2.imread(str(image_path))
+    image_path = newest_stable_image(camera_dir)
+    if image_path is None:
+        return {"detected": False, "detail": "no stable camera frame"}, None
+    frame = read_camera_frame(image_path)
     if frame is None:
         return {"detected": False, "detail": "frame unreadable"}, None
-    selection = load_selection()
+    saved_selection = load_selection()
+    selection = None if display_mode == "banner" else saved_selection
+    heads: list[tuple[int, int, int, int]] = []
     if selection is not None:
-        bbox = STATE.selection_tracker.bbox(frame, image_path)
+        demand = load_demand_state()
+        bbox = None
+        if (
+            demand is not None
+            and STATE.steering.running()
+            and demand.get("mode") in {"custom", "head", "person"}
+            and demand.get("detected")
+        ):
+            bbox = demand_bbox(demand, frame)
+        if bbox is None:
+            bbox = STATE.selection_tracker.bbox(frame, image_path)
+        if bbox is None:
+            bbox = normalized_selection_to_bbox(selection, frame)
+    elif display_mode in {"head", "person"}:
+        heads = cached_heads(frame, image_path)
+        bbox = None
+    elif display_mode == "banner":
+        bbox = detect_banner_target(frame, 25.0)
     else:
-        bbox = detect_red_target(frame, 25.0)
+        bbox = detect_colored_target(frame, 25.0)
     target: dict[str, Any] = {"detected": False, "detail": "not detected"}
     if bbox is not None:
         x, y, width, height = bbox
         frame_height, frame_width = frame.shape[:2]
         center_x = (x + width / 2) / frame_width
         center_y = (y + height / 2) / frame_height
-        mode = "custom" if selection is not None else "banner"
+        mode = str(selection.get("mode", "custom")) if selection is not None else "red"
+        if selection is None:
+            mode = display_mode
         target = {
             "detected": True,
             "mode": mode,
@@ -1733,6 +2077,8 @@ def latest_target() -> tuple[dict[str, Any], bytes | None]:
             "camera_dir": str(camera_dir),
         }
         color = (255, 180, 60) if selection is not None else (0, 255, 255)
+        if selection is None and display_mode == "banner":
+            color = (80, 220, 255)
         cv2.rectangle(frame, (x, y), (x + width, y + height), color, 2)
         cv2.circle(
             frame,
@@ -1742,16 +2088,128 @@ def latest_target() -> tuple[dict[str, Any], bytes | None]:
             -1,
         )
     elif selection is not None:
-        target = {"detected": False, "mode": "custom", "detail": "custom tracking lost"}
+        target = {
+            "detected": False,
+            "mode": str(selection.get("mode", "custom")),
+            "detail": "custom tracking lost",
+        }
         frame_height, frame_width = frame.shape[:2]
         sx = int(float(selection["x"]) * frame_width)
         sy = int(float(selection["y"]) * frame_height)
         sw = int(float(selection["width"]) * frame_width)
         sh = int(float(selection["height"]) * frame_height)
         cv2.rectangle(frame, (sx, sy), (sx + sw, sy + sh), (90, 90, 255), 2)
+    elif display_mode in {"head", "person"}:
+        target = {
+            "detected": False,
+            "mode": "head",
+            "detail": "select a head/face",
+            "head_count": len(heads),
+        }
+        draw_heads_overlay(frame, heads)
     draw_center_overlay(frame)
+    draw_demand_overlay(frame, target)
     ok, encoded = cv2.imencode(".jpg", frame)
     return target, encoded.tobytes() if ok else None
+
+
+def load_demand_state(max_age_s: float = 1.5) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(DEMAND_STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    updated_unix_s = payload.get("updated_unix_s")
+    if not isinstance(updated_unix_s, (int, float)):
+        return None
+    if time.time() - float(updated_unix_s) > max_age_s:
+        return None
+    return payload
+
+
+def demand_float(payload: dict[str, Any], key: str, default: float = 0.0) -> float:
+    value = payload.get(key, default)
+    if isinstance(value, (int, float)):
+        return float(value)
+    return default
+
+
+def demand_bbox(payload: dict[str, Any], frame: Any) -> tuple[int, int, int, int] | None:
+    raw_bbox = payload.get("bbox")
+    if not isinstance(raw_bbox, (list, tuple)) or len(raw_bbox) != 4:
+        return None
+    try:
+        bbox = tuple(round(float(value)) for value in raw_bbox)
+    except (TypeError, ValueError):
+        return None
+    frame_height, frame_width = frame.shape[:2]
+    return clamp_bbox(bbox, frame_width, frame_height)
+
+
+def draw_label(frame: Any, lines: list[str], origin: tuple[int, int]) -> None:
+    if not lines:
+        return
+    x, y = origin
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.48
+    thickness = 1
+    line_height = 18
+    width = 0
+    for line in lines:
+        (text_width, _text_height), _baseline = cv2.getTextSize(line, font, scale, thickness)
+        width = max(width, text_width)
+    height = line_height * len(lines) + 10
+    cv2.rectangle(frame, (x, y), (x + width + 12, y + height), (0, 0, 0), -1)
+    cv2.rectangle(frame, (x, y), (x + width + 12, y + height), (255, 255, 255), 1)
+    for index, line in enumerate(lines):
+        cv2.putText(
+            frame,
+            line,
+            (x + 6, y + 18 + index * line_height),
+            font,
+            scale,
+            (255, 255, 255),
+            thickness,
+            cv2.LINE_AA,
+        )
+
+
+def draw_demand_overlay(frame: Any, target: dict[str, Any]) -> None:
+    demand = load_demand_state()
+    if demand is None:
+        return
+    frame_height, frame_width = frame.shape[:2]
+    center = (frame_width // 2, frame_height // 2)
+    if target.get("detected"):
+        target_x = int(float(target.get("center_x", 0.5)) * frame_width)
+        target_y = int(float(target.get("center_y", 0.5)) * frame_height)
+        cv2.arrowedLine(frame, center, (target_x, target_y), (80, 255, 80), 2, tipLength=0.08)
+
+    roll_deg = demand_float(demand, "roll_deg")
+    pitch_deg = demand_float(demand, "pitch_deg")
+    max_roll_deg = max(1.0, demand_float(demand, "max_roll_deg", MAX_FIXED_WING_ROLL_DEG))
+    max_pitch_deg = max(1.0, demand_float(demand, "max_pitch_deg", MAX_FIXED_WING_PITCH_DEG))
+    demand_x = center[0] + round((roll_deg / max_roll_deg) * frame_width * 0.34)
+    demand_y = center[1] - round((pitch_deg / max_pitch_deg) * frame_height * 0.34)
+    demand_x = max(0, min(frame_width - 1, demand_x))
+    demand_y = max(0, min(frame_height - 1, demand_y))
+    cv2.arrowedLine(frame, center, (demand_x, demand_y), (0, 220, 255), 3, tipLength=0.16)
+    cv2.circle(frame, (demand_x, demand_y), 5, (0, 220, 255), -1)
+
+    roll_pwm = round(demand_float(demand, "roll_pwm", 1500.0))
+    pitch_pwm = round(demand_float(demand, "pitch_pwm", 1500.0))
+    frame_age_ms = demand.get("frame_age_ms")
+    age_text = "age --ms"
+    if isinstance(frame_age_ms, (int, float)):
+        age_text = f"age {frame_age_ms:.0f}ms"
+    lines = [
+        f"demand {demand_float(demand, 'rate_hz', 0.0):.0f} Hz",
+        f"roll {roll_deg:+.1f} deg pwm {roll_pwm}",
+        f"pitch {pitch_deg:+.1f} deg pwm {pitch_pwm}",
+        age_text,
+    ]
+    if not demand.get("detected", False):
+        lines.append(str(demand.get("loss_behavior", "target lost")))
+    draw_label(frame, lines, (10, 10))
 
 
 def draw_center_overlay(frame: Any) -> None:
@@ -1774,6 +2232,27 @@ def draw_center_overlay(frame: Any) -> None:
     cv2.line(frame, (center_x, center_y - 10), (center_x, center_y + 10), color, 1)
 
 
+def draw_heads_overlay(frame: Any, heads: list[tuple[int, int, int, int]]) -> None:
+    color = (80, 220, 255)
+    shadow = (0, 0, 0)
+    for index, (x, y, width, height) in enumerate(heads, start=1):
+        cv2.rectangle(frame, (x, y), (x + width, y + height), shadow, 4)
+        cv2.rectangle(frame, (x, y), (x + width, y + height), color, 2)
+        label = f"H{index}"
+        cv2.rectangle(frame, (x, max(0, y - 22)), (x + 42, y), shadow, -1)
+        cv2.putText(
+            frame,
+            label,
+            (x + 5, max(15, y - 6)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.52,
+            color,
+            2,
+            cv2.LINE_AA,
+        )
+    draw_label(frame, [f"heads {len(heads)}", "click head to lock"], (10, 10))
+
+
 def tail(path: Path, lines: int = 80) -> str:
     if not path.exists():
         return ""
@@ -1781,8 +2260,8 @@ def tail(path: Path, lines: int = 80) -> str:
     return "\n".join(content[-lines:])
 
 
-def status_payload() -> dict[str, Any]:
-    target, _ = latest_target()
+def status_payload(display_mode: str = "red") -> dict[str, Any]:
+    target, _ = latest_target(display_mode)
     port_5600_owners = udp_port_owners(5600)
     camera_dir = active_camera_dir()
     if camera_dir is None and (
@@ -1815,7 +2294,11 @@ def status_payload() -> dict[str, Any]:
         },
         "video": {
             "source": STATE.video_source,
+            "input_label": "Gazebo UDP 5600" if STATE.video_source == "udp" else "RTSP",
             "rtsp_url": STATE.rtsp_url,
+        },
+        "runtime": {
+            "simulator": STATE.simulator_mode,
         },
         "selection": selection_payload(),
         "logs": {
@@ -1858,10 +2341,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send_body(body, "text/html; charset=utf-8")
             return
         if parsed.path == "/api/status":
-            self.send_json(status_payload())
+            query = parse_qs(parsed.query)
+            display_mode = query.get("mode", ["red"])[0]
+            self.send_json(status_payload(display_mode))
             return
         if parsed.path == "/api/frame.jpg":
-            _, image = latest_target()
+            query = parse_qs(parsed.query)
+            display_mode = query.get("mode", ["red"])[0]
+            _, image = latest_target(display_mode)
             if image is None:
                 self.send_response(HTTPStatus.NO_CONTENT)
                 self.end_headers()
@@ -1897,7 +2384,7 @@ class Handler(BaseHTTPRequestHandler):
                 mavlink_endpoint = query.get("mavlink", [STATE.mavlink_endpoint])[0]
                 duration = float(query.get("duration", ["20"])[0])
                 forward_mps = float(query.get("forward_mps", ["3.0"])[0])
-                rate_hz = float(query.get("rate_hz", ["10"])[0])
+                rate_hz = float(query.get("rate_hz", ["30"])[0])
                 max_down_mps = float(query.get("max_down_mps", ["3.0"])[0])
                 vertical_gain = float(query.get("vertical_gain", ["52"])[0])
                 plane_centering_gain = float(query.get("plane_centering_gain", ["1.15"])[0])
@@ -1929,7 +2416,8 @@ class Handler(BaseHTTPRequestHandler):
                     query.get("plane_max_roll_step_deg", ["3.0"])[0]
                 )
                 plane_loss_hold_s = float(query.get("plane_loss_hold_s", ["1.5"])[0])
-                tracking_mode = query.get("tracking_mode", ["banner"])[0]
+                tracking_mode = query.get("tracking_mode", ["red"])[0]
+                surface_test = query.get("surface_test", ["0"])[0] in {"1", "true", "True"}
                 message = STATE.start_steering(
                     duration,
                     forward_mps,
@@ -1951,6 +2439,7 @@ class Handler(BaseHTTPRequestHandler):
                     plane_loss_hold_s,
                     tracking_mode,
                     mavlink_endpoint,
+                    surface_test,
                 )
             elif parsed.path == "/api/stop_steering":
                 message = STATE.steering.stop()
@@ -1983,6 +2472,14 @@ class Handler(BaseHTTPRequestHandler):
                 except (ValueError, json.JSONDecodeError):
                     raw_selection = {}
                 message = save_selection(raw_selection)
+            elif parsed.path in {"/api/selection/head", "/api/selection/person"}:
+                try:
+                    x_norm = float(query.get("x", ["nan"])[0])
+                    y_norm = float(query.get("y", ["nan"])[0])
+                except ValueError:
+                    x_norm = float("nan")
+                    y_norm = float("nan")
+                message = select_head_at(x_norm, y_norm)
             elif parsed.path == "/api/selection/clear":
                 with contextlib.suppress(FileNotFoundError):
                     SELECTION_PATH.unlink()
@@ -2023,7 +2520,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument(
+        "-manual",
+        "--manual",
+        dest="no_auto_start",
+        action="store_true",
+        help=(
+            "Start only the web UI; do not launch Gazebo, SITL/MAVLink, "
+            "camera bridge, or target motion."
+        ),
+    )
+    parser.add_argument(
         "--no-auto-start",
+        dest="no_auto_start",
         action="store_true",
         help="Start only the web UI instead of launching Gazebo, SITL, camera, and target motion.",
     )
@@ -2079,6 +2587,7 @@ def main() -> int:
         )
         return 2
     STATE.configure(VEHICLE_PROFILES[args.vehicle])
+    STATE.configure_runtime_io(simulator=not args.no_auto_start)
     try:
         server, actual_port = make_server(args.host, args.port, not args.no_auto_port)
     except RuntimeError as exc:

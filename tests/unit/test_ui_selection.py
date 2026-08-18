@@ -1,8 +1,11 @@
 import importlib.util
+import os
 import sys
+import time
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
+import cv2
 import numpy as np
 
 
@@ -54,6 +57,18 @@ def test_custom_selection_rejects_bad_geometry(tmp_path: Path) -> None:
     assert module.selection_payload()["enabled"] is False
 
 
+def test_head_selection_round_trip(tmp_path: Path) -> None:
+    module = load_ui_module()
+    module.SELECTION_PATH = tmp_path / "selection.json"
+
+    message = module.save_selection(
+        {"mode": "head", "x": 0.2, "y": 0.3, "width": 0.2, "height": 0.5}
+    )
+
+    assert message == "head selection saved"
+    assert module.selection_payload()["mode"] == "head"
+
+
 def test_vehicle_argument_defaults_to_quad(monkeypatch) -> None:
     module = load_ui_module()
     monkeypatch.setattr(sys, "argv", ["vulture_x_ui.py"])
@@ -70,6 +85,78 @@ def test_vehicle_argument_accepts_plane(monkeypatch) -> None:
     args = module.parse_args()
 
     assert args.vehicle == "plane"
+
+
+def test_manual_argument_disables_auto_start(monkeypatch) -> None:
+    module = load_ui_module()
+    monkeypatch.setattr(sys, "argv", ["vulture_x_ui.py", "-manual"])
+
+    args = module.parse_args()
+
+    assert args.no_auto_start is True
+
+
+def test_runtime_io_defaults_to_simulator_when_auto_starting() -> None:
+    module = load_ui_module()
+    state = module.AppState(module.VEHICLE_PROFILES["plane"])
+
+    state.configure_runtime_io(simulator=True)
+
+    assert state.mavlink_endpoint == "udpin:0.0.0.0:14550"
+    assert state.video_source == "udp"
+    assert state.rtsp_url == ""
+
+
+def test_status_labels_simulator_camera_as_gazebo_udp(tmp_path: Path, monkeypatch) -> None:
+    module = load_ui_module()
+    module.LOG_DIR = tmp_path
+    module.CAMERA_DIR = tmp_path / "camera_frames"
+    state = module.AppState(module.VEHICLE_PROFILES["plane"])
+    state.configure_runtime_io(simulator=True)
+    monkeypatch.setattr(module, "STATE", state)
+
+    payload = module.status_payload()
+
+    assert payload["video"]["source"] == "udp"
+    assert payload["video"]["input_label"] == "Gazebo UDP 5600"
+    assert payload["runtime"]["simulator"] is True
+
+
+def test_status_payload_uses_requested_display_mode(monkeypatch) -> None:
+    module = load_ui_module()
+    seen: list[str] = []
+
+    def fake_latest_target(display_mode: str = "red") -> tuple[dict[str, object], None]:
+        seen.append(display_mode)
+        return {"detected": False, "mode": display_mode}, None
+
+    monkeypatch.setattr(module, "latest_target", fake_latest_target)
+
+    payload = module.status_payload("banner")
+
+    assert seen == ["banner"]
+    assert payload["target"]["mode"] == "banner"
+
+
+def test_simulator_controls_exist_but_start_hidden() -> None:
+    module = load_ui_module()
+
+    assert 'id="sim-actions"' in module.HTML
+    assert "Start Gazebo" in module.HTML
+    assert "Start SITL" in module.HTML
+    assert "Plane Takeoff" in module.HTML
+    assert "Start Target" in module.HTML
+
+
+def test_runtime_io_keeps_hardware_defaults_for_manual() -> None:
+    module = load_ui_module()
+    state = module.AppState(module.VEHICLE_PROFILES["plane"])
+
+    state.configure_runtime_io(simulator=False)
+
+    assert state.mavlink_endpoint == "udpcl:192.168.144.12:19856"
+    assert state.video_source == "rtsp"
+    assert state.rtsp_url == "rtsp://192.168.144.25:8554/main.264"
 
 
 def test_app_state_configures_plane_commands(tmp_path: Path, monkeypatch) -> None:
@@ -193,6 +280,381 @@ def test_app_state_configures_plane_commands(tmp_path: Path, monkeypatch) -> Non
     assert "--max-plane-roll-deg" not in state.steering.command
 
 
+def test_app_state_configures_plane_surface_test_command(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = load_ui_module()
+    module.LOG_DIR = tmp_path
+    module.CAMERA_DIR = tmp_path / "camera_frames"
+    module.SELECTION_PATH = tmp_path / "custom_selection.json"
+    module.CAMERA_DIR.mkdir(parents=True)
+    (module.CAMERA_DIR / "frame-000001.jpg").write_bytes(b"not-a-real-test-image")
+    module.SELECTION_PATH.write_text(
+        '{"mode":"custom","x":0.25,"y":0.25,"width":0.1,"height":0.1}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module.ManagedProcess, "start", lambda self: "steering started")
+    state = module.AppState(module.VEHICLE_PROFILES["plane"])
+
+    assert (
+        state.start_steering(
+            duration_s=30,
+            forward_mps=20,
+            rate_hz=10,
+            max_down_mps=10,
+            vertical_gain=52,
+            plane_centering_gain=1.15,
+            plane_near_centering_gain=2.15,
+            plane_damping_gain=0.22,
+            plane_near_damping_gain=0.45,
+            plane_far_control_scale=0.55,
+            max_plane_pitch_deg=40,
+            plane_pitch_gain_scale=1.10,
+            plane_pitch_near_gain_scale=1.45,
+            plane_pitch_below_center_boost=0.25,
+            plane_pitch_filter_alpha=0.25,
+            plane_max_pitch_step_deg=2.0,
+            plane_max_roll_step_deg=3.0,
+            plane_loss_hold_s=1.5,
+            tracking_mode="custom",
+            mavlink_endpoint="udpout:192.168.144.12:19856",
+            surface_test=True,
+        )
+        == "steering started"
+    )
+    assert "--surface-test" in state.steering.command
+    assert state.steering.command[state.steering.command.index("--mavlink") + 1] == (
+        "udpout:192.168.144.12:19856"
+    )
+    assert state.steering.command[state.steering.command.index("--selection-file") + 1] == str(
+        module.SELECTION_PATH
+    )
+    assert (
+        state.steering.command[state.steering.command.index("--plane-param-cache-file") + 1]
+        == str(module.PLANE_PARAM_CACHE_PATH)
+    )
+    assert "--surface-test-throttle" not in state.steering.command
+
+
+def test_simulator_plane_surface_test_uses_eighty_percent_throttle(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = load_ui_module()
+    module.LOG_DIR = tmp_path
+    module.CAMERA_DIR = tmp_path / "camera_frames"
+    module.SELECTION_PATH = tmp_path / "custom_selection.json"
+    module.CAMERA_DIR.mkdir(parents=True)
+    (module.CAMERA_DIR / "frame-000001.jpg").write_bytes(b"not-a-real-test-image")
+    module.SELECTION_PATH.write_text(
+        '{"mode":"custom","x":0.25,"y":0.25,"width":0.1,"height":0.1}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module.ManagedProcess, "start", lambda self: "steering started")
+    state = module.AppState(module.VEHICLE_PROFILES["plane"])
+    state.configure_runtime_io(simulator=True)
+
+    assert (
+        state.start_steering(
+            duration_s=30,
+            forward_mps=20,
+            rate_hz=10,
+            max_down_mps=10,
+            vertical_gain=52,
+            plane_centering_gain=1.15,
+            plane_near_centering_gain=2.15,
+            plane_damping_gain=0.22,
+            plane_near_damping_gain=0.45,
+            plane_far_control_scale=0.55,
+            max_plane_pitch_deg=40,
+            plane_pitch_gain_scale=1.10,
+            plane_pitch_near_gain_scale=1.45,
+            plane_pitch_below_center_boost=0.25,
+            plane_pitch_filter_alpha=0.25,
+            plane_max_pitch_step_deg=2.0,
+            plane_max_roll_step_deg=3.0,
+            plane_loss_hold_s=1.5,
+            tracking_mode="custom",
+            mavlink_endpoint="udpin:0.0.0.0:14550",
+            surface_test=True,
+        )
+        == "steering started"
+    )
+
+    assert "--surface-test-throttle" in state.steering.command
+    assert (
+        state.steering.command[state.steering.command.index("--surface-test-throttle") + 1]
+        == "0.8"
+    )
+
+
+def test_app_state_surface_test_tracks_red_without_manual_selection(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = load_ui_module()
+    module.LOG_DIR = tmp_path
+    module.CAMERA_DIR = tmp_path / "camera_frames"
+    module.SELECTION_PATH = tmp_path / "custom_selection.json"
+    module.CAMERA_DIR.mkdir(parents=True)
+    (module.CAMERA_DIR / "frame-000001.jpg").write_bytes(b"not-a-real-test-image")
+    monkeypatch.setattr(module.ManagedProcess, "start", lambda self: "steering started")
+    state = module.AppState(module.VEHICLE_PROFILES["plane"])
+
+    assert (
+        state.start_steering(
+            duration_s=30,
+            forward_mps=20,
+            rate_hz=15,
+            max_down_mps=10,
+            vertical_gain=52,
+            plane_centering_gain=1.15,
+            plane_near_centering_gain=2.15,
+            plane_damping_gain=0.22,
+            plane_near_damping_gain=0.45,
+            plane_far_control_scale=0.55,
+            max_plane_pitch_deg=40,
+            plane_pitch_gain_scale=1.10,
+            plane_pitch_near_gain_scale=1.45,
+            plane_pitch_below_center_boost=0.25,
+            plane_pitch_filter_alpha=0.25,
+            plane_max_pitch_step_deg=2.0,
+            plane_max_roll_step_deg=3.0,
+            plane_loss_hold_s=1.5,
+            tracking_mode="red",
+            mavlink_endpoint="udpcl:192.168.144.12:19856",
+            surface_test=True,
+        )
+        == "steering started"
+    )
+    assert state.steering.command[state.steering.command.index("--tracking-mode") + 1] == "red"
+    assert state.steering.command[state.steering.command.index("--mavlink") + 1] == (
+        "udpcl:192.168.144.12:19856"
+    )
+    assert state.steering.command[state.steering.command.index("--rate-hz") + 1] == "15"
+    assert "--surface-test" in state.steering.command
+    assert "--selection-file" not in state.steering.command
+
+
+def test_app_state_surface_test_tracks_selected_head(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = load_ui_module()
+    module.LOG_DIR = tmp_path
+    module.CAMERA_DIR = tmp_path / "camera_frames"
+    module.SELECTION_PATH = tmp_path / "custom_selection.json"
+    module.CAMERA_DIR.mkdir(parents=True)
+    (module.CAMERA_DIR / "frame-000001.jpg").write_bytes(b"not-a-real-test-image")
+    module.SELECTION_PATH.write_text(
+        '{"mode":"head","x":0.25,"y":0.25,"width":0.1,"height":0.3}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module.ManagedProcess, "start", lambda self: "steering started")
+    state = module.AppState(module.VEHICLE_PROFILES["plane"])
+
+    assert (
+        state.start_steering(
+            duration_s=30,
+            forward_mps=20,
+            rate_hz=30,
+            max_down_mps=10,
+            vertical_gain=52,
+            plane_centering_gain=1.15,
+            plane_near_centering_gain=2.15,
+            plane_damping_gain=0.22,
+            plane_near_damping_gain=0.45,
+            plane_far_control_scale=0.55,
+            max_plane_pitch_deg=40,
+            plane_pitch_gain_scale=1.10,
+            plane_pitch_near_gain_scale=1.45,
+            plane_pitch_below_center_boost=0.25,
+            plane_pitch_filter_alpha=0.25,
+            plane_max_pitch_step_deg=2.0,
+            plane_max_roll_step_deg=3.0,
+            plane_loss_hold_s=1.5,
+            tracking_mode="head",
+            mavlink_endpoint="udpcl:192.168.144.12:19856",
+            surface_test=True,
+        )
+        == "steering started"
+    )
+    assert state.steering.command[state.steering.command.index("--tracking-mode") + 1] == "head"
+    assert state.steering.command[state.steering.command.index("--selection-file") + 1] == str(
+        module.SELECTION_PATH
+    )
+
+
+def test_latest_target_uses_ui_tracker_for_custom_selection(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = load_ui_module()
+    module.LOG_DIR = tmp_path
+    module.CAMERA_DIR = tmp_path / "camera_frames"
+    module.SELECTION_PATH = tmp_path / "custom_selection.json"
+    module.CAMERA_DIR.mkdir(parents=True)
+    frame_path = module.CAMERA_DIR / "frame-000001.jpg"
+    frame = np.zeros((120, 200, 3), dtype=np.uint8)
+    cv2.rectangle(frame, (64, 38), (104, 86), (0, 0, 230), -1)
+    cv2.imwrite(str(frame_path), frame)
+    old_mtime = time.time() - 1.0
+    os.utime(frame_path, (old_mtime, old_mtime))
+    module.SELECTION_PATH.write_text(
+        '{"mode":"custom","x":0.1,"y":0.1,"width":0.8,"height":0.7}',
+        encoding="utf-8",
+    )
+    state = module.AppState(module.VEHICLE_PROFILES["plane"])
+    monkeypatch.setattr(module, "STATE", state)
+
+    target, image = module.latest_target()
+
+    assert image is not None
+    assert target["detected"] is True
+    x, y, width, height = target["bbox"]
+    assert x > 45
+    assert y > 25
+    assert x + width < 125
+    assert y + height < 100
+
+
+def test_latest_target_prefers_tracking_demand_bbox_for_custom_selection(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = load_ui_module()
+    module.LOG_DIR = tmp_path
+    module.CAMERA_DIR = tmp_path / "camera_frames"
+    module.SELECTION_PATH = tmp_path / "custom_selection.json"
+    module.DEMAND_STATE_PATH = tmp_path / "tracking_demand.json"
+    module.CAMERA_DIR.mkdir(parents=True)
+    frame_path = module.CAMERA_DIR / "frame-000001.jpg"
+    frame = np.zeros((120, 200, 3), dtype=np.uint8)
+    cv2.imwrite(str(frame_path), frame)
+    old_mtime = time.time() - 1.0
+    os.utime(frame_path, (old_mtime, old_mtime))
+    module.SELECTION_PATH.write_text(
+        '{"mode":"custom","x":0.1,"y":0.1,"width":0.8,"height":0.7}',
+        encoding="utf-8",
+    )
+    module.DEMAND_STATE_PATH.write_text(
+        (
+            '{"mode":"custom","detected":true,"bbox":[70,40,36,42],'
+            f'"updated_unix_s":{time.time()}}}'
+        ),
+        encoding="utf-8",
+    )
+    state = module.AppState(module.VEHICLE_PROFILES["plane"])
+    monkeypatch.setattr(module, "STATE", state)
+    monkeypatch.setattr(state.steering, "running", lambda: True)
+    monkeypatch.setattr(
+        state.selection_tracker,
+        "bbox",
+        lambda _frame, _image_path: (_ for _ in ()).throw(AssertionError("fallback used")),
+    )
+
+    target, image = module.latest_target()
+
+    assert image is not None
+    assert target["bbox"] == [70, 40, 36, 42]
+
+
+def test_latest_target_uses_banner_detector_even_with_saved_selection(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = load_ui_module()
+    module.LOG_DIR = tmp_path
+    module.CAMERA_DIR = tmp_path / "camera_frames"
+    module.SELECTION_PATH = tmp_path / "custom_selection.json"
+    module.CAMERA_DIR.mkdir(parents=True)
+    frame_path = module.CAMERA_DIR / "frame-000001.jpg"
+    frame = np.zeros((120, 200, 3), dtype=np.uint8)
+    cv2.imwrite(str(frame_path), frame)
+    old_mtime = time.time() - 1.0
+    os.utime(frame_path, (old_mtime, old_mtime))
+    module.SELECTION_PATH.write_text(
+        '{"mode":"custom","x":0.1,"y":0.1,"width":0.8,"height":0.7}',
+        encoding="utf-8",
+    )
+    state = module.AppState(module.VEHICLE_PROFILES["plane"])
+    monkeypatch.setattr(module, "STATE", state)
+    monkeypatch.setattr(module, "detect_banner_target", lambda _frame, _min_area: (20, 30, 40, 50))
+    monkeypatch.setattr(
+        module,
+        "detect_colored_target",
+        lambda _frame, _min_area: (_ for _ in ()).throw(AssertionError("red detector used")),
+    )
+    monkeypatch.setattr(
+        state.selection_tracker,
+        "bbox",
+        lambda _frame, _image_path: (_ for _ in ()).throw(AssertionError("selection used")),
+    )
+
+    target, image = module.latest_target("banner")
+
+    assert image is not None
+    assert target["mode"] == "banner"
+    assert target["bbox"] == [20, 30, 40, 50]
+
+
+def test_select_head_at_saves_clicked_head_bbox(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = load_ui_module()
+    module.LOG_DIR = tmp_path
+    module.CAMERA_DIR = tmp_path / "camera_frames"
+    module.SELECTION_PATH = tmp_path / "custom_selection.json"
+    module.CAMERA_DIR.mkdir(parents=True)
+    frame_path = module.CAMERA_DIR / "frame-000001.jpg"
+    frame = np.zeros((120, 200, 3), dtype=np.uint8)
+    cv2.imwrite(str(frame_path), frame)
+    old_mtime = time.time() - 1.0
+    os.utime(frame_path, (old_mtime, old_mtime))
+    monkeypatch.setattr(
+        module,
+        "detect_heads",
+        lambda _frame, **_kwargs: [(10, 20, 30, 80), (100, 15, 40, 90)],
+    )
+
+    message = module.select_head_at(0.60, 0.50)
+
+    assert message == "head selection saved heads_detected=2"
+    payload = module.selection_payload()
+    assert payload["mode"] == "head"
+    assert payload["x"] == 0.5
+    assert payload["width"] == 0.2
+
+
+def test_latest_target_draws_head_count_without_selection(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = load_ui_module()
+    module.LOG_DIR = tmp_path
+    module.CAMERA_DIR = tmp_path / "camera_frames"
+    module.SELECTION_PATH = tmp_path / "custom_selection.json"
+    module.CAMERA_DIR.mkdir(parents=True)
+    frame_path = module.CAMERA_DIR / "frame-000001.jpg"
+    frame = np.zeros((120, 200, 3), dtype=np.uint8)
+    cv2.imwrite(str(frame_path), frame)
+    old_mtime = time.time() - 1.0
+    os.utime(frame_path, (old_mtime, old_mtime))
+    monkeypatch.setattr(
+        module,
+        "detect_heads",
+        lambda _frame, **_kwargs: [(10, 20, 30, 80), (100, 15, 40, 90)],
+    )
+
+    target, image = module.latest_target("head")
+
+    assert image is not None
+    assert target["mode"] == "head"
+    assert target["head_count"] == 2
+
+
 def test_app_state_configures_quad_commands_without_plane_parameters(
     tmp_path: Path,
     monkeypatch,
@@ -290,10 +752,16 @@ def test_camera_bridge_accepts_rtsp_input(tmp_path: Path, monkeypatch) -> None:
     assert state.bridge.command[:5] == [
         "gst-launch-1.0",
         "-q",
-        "rtspsrc",
-        "location=rtsp://127.0.0.1:8554/cam",
-        "latency=100",
+        "uridecodebin",
+        "uri=rtsp://127.0.0.1:8554/cam",
+        "source::latency=50",
     ]
+    assert "source::drop-on-latency=true" in state.bridge.command
+    assert "source::do-retransmission=false" in state.bridge.command
+    assert "source::protocols=tcp" in state.bridge.command
+    assert "max-rate=30" in state.bridge.command
+    assert "rtph264depay" not in state.bridge.command
+    assert "avdec_h264" not in state.bridge.command
     assert f"location={module.CAMERA_DIR}/frame-%06d.jpg" in state.bridge.command
 
 
@@ -305,6 +773,7 @@ def test_mavlink_connect_probe_updates_control_endpoint(tmp_path: Path, monkeypa
 
     class FakeConnection:
         closed = False
+        mav = SimpleNamespace(heartbeat_send=lambda *_args: None)
 
         def wait_heartbeat(self, timeout: float) -> object:
             assert timeout == 3.0
@@ -358,3 +827,11 @@ def test_mavlink_endpoint_parser_accepts_serial() -> None:
 
     assert parsed.device == "/dev/ttyUSB0"
     assert parsed.baud == 57600
+
+
+def test_mavlink_endpoint_parser_accepts_mission_planner_udpcl() -> None:
+    module = load_ui_module()
+
+    parsed = module.parse_mavlink_endpoint("udpcl:192.168.144.12:19856")
+
+    assert parsed.device == "udpout:192.168.144.12:19856"

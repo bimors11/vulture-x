@@ -110,3 +110,18 @@ def test_partially_visible_edge_banner_is_rejected() -> None:
     draw_banner(frame, (190, 20), 70)
 
     assert module.detect_red_target(frame, min_area=25.0) is None
+
+
+def test_partially_visible_edge_colored_target_is_detected() -> None:
+    module = load_camera_target_module()
+    frame = np.zeros((180, 260, 3), dtype=np.uint8)
+    cv2.rectangle(frame, (0, 58), (38, 122), (0, 0, 230), -1)
+
+    bbox = module.detect_colored_target(frame, min_area=80.0)
+
+    assert bbox is not None
+    x, y, width, height = bbox
+    assert x == 0
+    assert y <= 58
+    assert x + width >= 38
+    assert y + height >= 122

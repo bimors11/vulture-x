@@ -1,7 +1,7 @@
 """OpenCV trackers with a stable Vulture-X result contract."""
 
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import cv2
 import numpy as np
@@ -59,6 +59,63 @@ def expand_bbox(
     width += int(2 * width * padding_fraction)
     height += int(2 * height * padding_fraction)
     return clamp_bbox((x, y, width, height), frame_width, frame_height)
+
+
+def refine_bbox_to_salient_region(
+    frame: ImageFrame,
+    bbox: tuple[int, int, int, int],
+    *,
+    min_area_fraction: float = 0.015,
+    padding_fraction: float = 0.12,
+) -> tuple[int, int, int, int]:
+    """Shrink a manual ROI around the most visually salient region inside it."""
+
+    frame_height, frame_width = frame.shape[:2]
+    x, y, width, height = clamp_bbox(bbox, frame_width, frame_height)
+    roi = frame[y : y + height, x : x + width]
+    if roi.size == 0 or width < 8 or height < 8:
+        return x, y, width, height
+
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    saturation = hsv[:, :, 1]
+    value = hsv[:, :, 2]
+    saturated = np.where(saturation >= 55, 255, 0).astype(np.uint8)
+    visible = np.where(value >= 45, 255, 0).astype(np.uint8)
+    mask = cv2.bitwise_and(saturated, visible)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return x, y, width, height
+
+    roi_area = float(width * height)
+    min_area = max(20.0, roi_area * min_area_fraction)
+    best_bbox: tuple[int, int, int, int] | None = None
+    best_score = 0.0
+    roi_center_x = width / 2.0
+    roi_center_y = height / 2.0
+    for contour in contours:
+        contour_area = float(cv2.contourArea(contour))
+        if contour_area < min_area:
+            continue
+        cx, cy, cwidth, cheight = cv2.boundingRect(contour)
+        if cwidth <= 0 or cheight <= 0:
+            continue
+        bbox_area = float(cwidth * cheight)
+        fill_ratio = contour_area / bbox_area
+        if fill_ratio < 0.18:
+            continue
+        center_dx = ((cx + cwidth / 2.0) - roi_center_x) / max(1.0, width)
+        center_dy = ((cy + cheight / 2.0) - roi_center_y) / max(1.0, height)
+        center_bonus = 1.0 - min(0.8, (center_dx * center_dx + center_dy * center_dy) ** 0.5)
+        score = contour_area * fill_ratio * center_bonus
+        if score > best_score:
+            best_score = score
+            best_bbox = (x + cx, y + cy, cwidth, cheight)
+
+    if best_bbox is None:
+        return x, y, width, height
+    return expand_bbox(best_bbox, padding_fraction, frame_width, frame_height)
 
 
 def choose_initial_bbox_from_point(
@@ -156,6 +213,8 @@ class TemplateMatchingTracker:
         max_center_jump_norm: float = 0.22,
         max_size_ratio: float = 8.0,
         scale_factors: tuple[float, ...] = (0.75, 0.85, 0.93, 1.0, 1.08, 1.18, 1.30),
+        grayscale: bool = False,
+        foreground_refinement: bool = True,
     ) -> None:
         self._search_margin_px = search_margin_px
         self._minimum_match_score = minimum_match_score
@@ -164,6 +223,8 @@ class TemplateMatchingTracker:
         self._max_center_jump_norm = max_center_jump_norm
         self._max_size_ratio = max_size_ratio
         self._scale_factors = scale_factors
+        self._grayscale = grayscale
+        self._foreground_refinement = foreground_refinement
         self._template: ImageFrame | None = None
         self._bbox: tuple[int, int, int, int] | None = None
 
@@ -175,7 +236,8 @@ class TemplateMatchingTracker:
             return False
 
         self._bbox = (x, y, width, height)
-        self._template = frame[y : y + height, x : x + width].copy()
+        tracking_frame = self._tracking_frame(frame)
+        self._template = tracking_frame[y : y + height, x : x + width].copy()
         return self._template.size > 0
 
     def update(self, frame: ImageFrame) -> tuple[bool, tuple[int, int, int, int]]:
@@ -188,7 +250,8 @@ class TemplateMatchingTracker:
         y1 = max(0, y - margin)
         x2 = min(frame.shape[1], x + width + margin)
         y2 = min(frame.shape[0], y + height + margin)
-        search_image = frame[y1:y2, x1:x2]
+        tracking_frame = self._tracking_frame(frame)
+        search_image = tracking_frame[y1:y2, x1:x2]
 
         if search_image.shape[0] < height or search_image.shape[1] < width:
             return False, self._bbox
@@ -200,12 +263,17 @@ class TemplateMatchingTracker:
         if match_score < self._minimum_match_score:
             return False, self._bbox
 
-        local_bbox = self._foreground_bbox(
-            search_image,
-            match_location,
-            matched_width,
-            matched_height,
-        ) or (match_location[0], match_location[1], matched_width, matched_height)
+        local_bbox = (match_location[0], match_location[1], matched_width, matched_height)
+        if self._foreground_refinement:
+            local_bbox = (
+                self._foreground_bbox(
+                    search_image,
+                    match_location,
+                    matched_width,
+                    matched_height,
+                )
+                or local_bbox
+            )
         local_x, local_y, local_width, local_height = local_bbox
         desired_bbox = clamp_bbox(
             (x1 + local_x, y1 + local_y, local_width, local_height),
@@ -217,7 +285,7 @@ class TemplateMatchingTracker:
         self._bbox = self._smooth_bbox(self._bbox, desired_bbox)
 
         new_x, new_y, new_width, new_height = self._bbox
-        new_template = frame[new_y : new_y + new_height, new_x : new_x + new_width].copy()
+        new_template = tracking_frame[new_y : new_y + new_height, new_x : new_x + new_width].copy()
         if new_template.size > 0:
             old_template = cv2.resize(
                 self._template,
@@ -233,6 +301,12 @@ class TemplateMatchingTracker:
             ).astype(np.uint8, copy=False)
 
         return True, self._bbox
+
+    def _tracking_frame(self, frame: ImageFrame) -> ImageFrame:
+        if not self._grayscale:
+            return frame
+        gray: Any = frame if len(frame.shape) == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return cast(ImageFrame, cv2.equalizeHist(gray))
 
     def _is_plausible_bbox_transition(
         self,
@@ -264,7 +338,7 @@ class TemplateMatchingTracker:
     ) -> tuple[float, tuple[int, int], int, int] | None:
         if self._template is None:
             return None
-        uniform_template = bool(np.max(np.std(self._template, axis=(0, 1))) < 1.0)
+        uniform_template = bool(float(np.max(np.std(self._template))) < 1.0)
         method = cv2.TM_SQDIFF if uniform_template else cv2.TM_CCOEFF_NORMED
         best: tuple[float, tuple[int, int], int, int] | None = None
         for scale in self._scale_factors:
@@ -298,6 +372,8 @@ class TemplateMatchingTracker:
         matched_height: int,
     ) -> tuple[int, int, int, int] | None:
         if self._template is None:
+            return None
+        if len(search_image.shape) == 2 or len(self._template.shape) == 2:
             return None
         mean_color = np.mean(self._template.reshape(-1, self._template.shape[2]), axis=0)
         color_std = float(np.max(np.std(self._template, axis=(0, 1))))

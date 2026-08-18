@@ -47,9 +47,14 @@ add explicit startup profile flags:
 ```bash
 scripts/run_ui.sh -quad
 scripts/run_ui.sh -plane
+scripts/run_ui.sh -manual
 scripts/run_gazebo.sh -plane
 scripts/run_sitl.sh -plane
 ```
+
+`-manual` starts only the browser UI and leaves Gazebo, SITL/MAVLink, camera
+bridging, and target motion disconnected until the operator starts or connects
+them from the panel.
 
 `-plane` uses the same ArduPilot checkout, `ArduPlane`, the `gazebo-zephyr`
 frame, and `simulation/worlds/vulture_x_plane.sdf`. It is a simulation

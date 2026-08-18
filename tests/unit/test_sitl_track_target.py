@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -233,7 +234,55 @@ def test_plane_visual_steering_defaults_to_airspeed_governor(monkeypatch) -> Non
     assert args.plane_max_pitch_step_deg == 2.0
     assert args.plane_max_roll_step_deg == 3.0
     assert args.plane_loss_hold_s == 1.5
+    assert args.tracking_mode == "red"
     assert args.read_plane_params is True
+    assert args.surface_test is False
+
+
+def test_plane_visual_steering_accepts_red_tracking_mode(monkeypatch) -> None:
+    module = load_tracking_module()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["sitl_track_target.py", "--enable-guidance", "--tracking-mode", "red"],
+    )
+
+    args = module.parse_args()
+
+    assert args.tracking_mode == "red"
+
+
+def test_plane_surface_test_argument_is_explicit(monkeypatch) -> None:
+    module = load_tracking_module()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "sitl_track_target.py",
+            "--enable-guidance",
+            "--surface-test",
+            "--surface-test-throttle",
+            "0.8",
+        ],
+    )
+
+    args = module.parse_args()
+
+    assert args.surface_test is True
+    assert args.surface_test_throttle == 0.8
+
+
+def test_head_tracking_mode_uses_operator_selection(monkeypatch) -> None:
+    module = load_tracking_module()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["sitl_track_target.py", "--enable-guidance", "--tracking-mode", "head"],
+    )
+
+    args = module.parse_args()
+
+    assert args.tracking_mode == "head"
 
 
 def test_apply_deadband_zeroes_small_image_error() -> None:
@@ -294,6 +343,23 @@ def test_read_plane_parameters_requests_named_params() -> None:
     assert len(connection.mav.param_request_read_calls) == 2
 
 
+def test_plane_parameter_cache_is_endpoint_scoped(tmp_path: Path) -> None:
+    module = load_tracking_module()
+    cache_path = tmp_path / "plane_params.json"
+
+    module.save_plane_param_cache(
+        cache_path,
+        "udpcl:192.168.144.12:19856",
+        {"LIM_ROLL_CD": 3500.0, "RCMAP_ROLL": 1.0},
+    )
+
+    assert module.load_plane_param_cache(cache_path, "udpcl:192.168.144.12:19856") == {
+        "LIM_ROLL_CD": 3500.0,
+        "RCMAP_ROLL": 1.0,
+    }
+    assert module.load_plane_param_cache(cache_path, "udpcl:192.168.144.99:19856") is None
+
+
 def test_plane_response_model_uses_aircraft_limits_and_time_constant(monkeypatch) -> None:
     module = load_tracking_module()
     monkeypatch.setattr(sys, "argv", ["sitl_track_target.py", "--enable-guidance"])
@@ -311,7 +377,10 @@ def test_plane_response_model_uses_aircraft_limits_and_time_constant(monkeypatch
             "ARSPD_FBW_MIN": 17.0,
             "ARSPD_FBW_MAX": 19.0,
             "PTCH2SRV_TCONST": 0.4,
+            "RCMAP_ROLL": 4.0,
             "RCMAP_PITCH": 2.0,
+            "RCMAP_THROTTLE": 1.0,
+            "RCMAP_YAW": 3.0,
             "RC2_REVERSED": 1.0,
         },
     )
@@ -325,6 +394,65 @@ def test_plane_response_model_uses_aircraft_limits_and_time_constant(monkeypatch
     assert model.target_airspeed_mps == 19.0
     assert 0.08 <= model.pitch_filter_alpha <= args.plane_pitch_filter_alpha
     assert model.pitch_rc_reversed is True
+    assert model.roll_channel == 4
+    assert model.pitch_channel == 2
+    assert model.throttle_channel == 1
+    assert model.yaw_channel == 3
+
+
+def test_plane_rc_attitude_uses_rcmap_channels() -> None:
+    module = load_tracking_module()
+    connection = FakeConnection()
+
+    module.send_plane_rc_attitude(
+        connection,
+        roll_deg=17.5,
+        pitch_deg=-17.5,
+        max_roll_deg=35.0,
+        max_pitch_deg=35.0,
+        throttle=0.75,
+        roll_channel=4,
+        pitch_channel=2,
+        throttle_channel=1,
+        yaw_channel=3,
+    )
+
+    call = connection.mav.rc_override_calls[-1]
+    assert call[2] == 1750
+    assert call[3] == 1250
+    assert call[4] == 1500
+    assert call[5] == 1750
+
+
+def test_surface_test_min_deflection_makes_small_pitch_visible() -> None:
+    module = load_tracking_module()
+
+    assert module.enforce_visible_surface_deflection(
+        command_deg=1.5,
+        error=-0.03,
+        min_deflection_deg=8.0,
+        limit_deg=40.0,
+        invert_error_sign=True,
+    ) == 8.0
+    assert module.enforce_visible_surface_deflection(
+        command_deg=-1.5,
+        error=0.03,
+        min_deflection_deg=8.0,
+        limit_deg=40.0,
+        invert_error_sign=True,
+    ) == -8.0
+    assert module.enforce_visible_surface_deflection(
+        command_deg=-2.0,
+        error=0.20,
+        min_deflection_deg=8.0,
+        limit_deg=40.0,
+    ) == 8.0
+    assert module.enforce_visible_surface_deflection(
+        command_deg=12.0,
+        error=-0.20,
+        min_deflection_deg=8.0,
+        limit_deg=40.0,
+    ) == -8.0
 
 
 def test_plane_throttle_governor_reduces_when_fast_or_nose_down() -> None:
@@ -522,7 +650,11 @@ def test_detector_backed_tracker_initializes_from_banner_detection() -> None:
     cv2.line(frame, (62, 42), (98, 78), (10, 10, 10), 3)
     cv2.line(frame, (98, 42), (62, 78), (10, 10, 10), 3)
 
-    tracker = module.DetectorBackedTracker("TEMPLATE", min_area=80.0)
+    tracker = module.DetectorBackedTracker(
+        "TEMPLATE",
+        min_area=80.0,
+        detector=module.detect_banner_target,
+    )
     bbox = tracker.bbox(frame)
 
     assert bbox is not None
@@ -531,6 +663,22 @@ def test_detector_backed_tracker_initializes_from_banner_detection() -> None:
     assert y < 32
     assert x + width > 108
     assert y + height > 88
+
+
+def test_detector_backed_tracker_initializes_from_red_detection() -> None:
+    module = load_tracking_module()
+    frame = np.zeros((120, 160, 3), dtype=np.uint8)
+    cv2.rectangle(frame, (58, 36), (102, 92), (0, 0, 230), -1)
+
+    tracker = module.DetectorBackedTracker("TEMPLATE", min_area=80.0)
+    bbox = tracker.bbox(frame)
+
+    assert bbox is not None
+    x, y, width, height = bbox
+    assert x < 58
+    assert y < 36
+    assert x + width > 102
+    assert y + height > 92
 
 
 class FakeSequenceTracker:
@@ -570,6 +718,73 @@ def test_custom_selection_tracker_holds_bbox_through_short_misses(
     assert tracker.bbox(frame) == initial
     assert tracker.bbox(frame) == initial
     assert tracker.bbox(frame) == initial
+
+
+def test_custom_selection_bbox_refines_to_salient_region(tmp_path: Path) -> None:
+    module = load_tracking_module()
+    selection_file = tmp_path / "selection.json"
+    selection_file.write_text(
+        '{"mode":"custom","x":0.1,"y":0.1,"width":0.8,"height":0.7}',
+        encoding="utf-8",
+    )
+    frame = np.zeros((120, 200, 3), dtype=np.uint8)
+    frame[:, :] = (40, 40, 40)
+    cv2.rectangle(frame, (64, 38), (104, 86), (0, 0, 230), -1)
+
+    bbox = module.selection_bbox(selection_file, frame)
+
+    x, y, width, height = bbox
+    assert x > 45
+    assert y > 25
+    assert x + width < 125
+    assert y + height < 100
+
+
+def test_head_selection_bbox_uses_same_roi_path(tmp_path: Path) -> None:
+    module = load_tracking_module()
+    selection_file = tmp_path / "selection.json"
+    selection_file.write_text(
+        '{"mode":"head","x":0.1,"y":0.1,"width":0.8,"height":0.7}',
+        encoding="utf-8",
+    )
+    frame = np.zeros((120, 200, 3), dtype=np.uint8)
+    frame[:, :] = (40, 40, 40)
+    cv2.rectangle(frame, (64, 38), (104, 86), (0, 0, 230), -1)
+
+    bbox = module.selection_bbox(selection_file, frame)
+
+    x, y, width, height = bbox
+    assert x > 45
+    assert y > 25
+    assert x + width < 125
+    assert y + height < 100
+
+
+def test_frame_directory_reader_skips_unstable_and_duplicate_frames(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = load_tracking_module()
+    old_frame = tmp_path / "frame-000001.jpg"
+    new_frame = tmp_path / "frame-000002.jpg"
+    cv2.imwrite(str(old_frame), np.zeros((12, 16, 3), dtype=np.uint8))
+    cv2.imwrite(str(new_frame), np.full((12, 16, 3), 255, dtype=np.uint8))
+    now = 1000.0
+    os.utime(old_frame, (now - 1.0, now - 1.0))
+    os.utime(new_frame, (now, now))
+    monkeypatch.setattr(module.time, "time", lambda: now)
+
+    reader = module.FrameDirectoryReader(tmp_path)
+
+    ok, frame, age_s = reader.read()
+    assert ok is True
+    assert frame is not None
+    assert age_s is not None and age_s >= 1.0
+    assert int(frame[0, 0, 0]) == 0
+
+    ok, frame, _age_s = reader.read()
+    assert ok is False
+    assert frame is None
 
 
 def test_perspective_corrected_error_keeps_center_and_edges_stable() -> None:

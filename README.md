@@ -221,6 +221,7 @@ The UI accepts the same startup profile flags:
 ```bash
 scripts/run_ui.sh -quad
 scripts/run_ui.sh -plane
+scripts/run_ui.sh -manual
 ```
 
 By default the UI binds to `0.0.0.0`, prints both localhost and LAN URLs, opens
@@ -242,8 +243,12 @@ selected endpoint with a heartbeat probe before starting steering.
 
 The camera bridge defaults to the existing UDP H.264 stream on port `5600`.
 From the web UI, change Video Input to RTSP, provide an `rtsp://` or `rtsps://`
-URL, then use `Connect Video` to decode an H.264 RTSP source into the same frame
-cache used by tracking. The `Steer Target` action is pinned in the top action
+URL, then use `Connect Video` to decode an RTSP H.264 or H.265/HEVC source into
+the same frame cache used by tracking. RTSP uses a low-latency GStreamer path by
+default: UDP transport, zero jitterbuffer latency, stale-packet dropping, and a
+single-frame leaky queue before JPEG frame export. If a lossy link needs a small
+buffer, set `VULTURE_X_RTSP_LATENCY_MS=50` or another value from `0` to `500`
+before launching the UI. The `Steer Target` action is pinned in the top action
 area so target tracking can be started without scrolling through tuning fields.
 
 The Gazebo launcher clears Python/OpenCV Qt plugin paths before starting Gazebo
@@ -253,7 +258,9 @@ so the GUI can use the system Qt plugins. To run Gazebo server-only instead:
 VULTURE_X_GAZEBO_HEADLESS=1 scripts/run_ui.sh
 ```
 
-Use `scripts/run_ui.sh --no-auto-start` to open only the web UI. Open the
+Use `scripts/run_ui.sh -manual` or `scripts/run_ui.sh --no-auto-start` to open
+only the web UI without launching Gazebo, SITL/MAVLink, the camera bridge, or
+target motion. Open the
 printed `vulture_x_ui_lan_url` from another device on the same network. Anyone
 who can reach that URL can operate the local SITL panel.
 
@@ -299,6 +306,31 @@ perspective-corrected image error for roll/pitch centering, estimates target
 proximity from bounding-box apparent size, smooths sudden bbox jumps, filters
 pitch commands, and reduces throttle when measured airspeed rises above the
 target.
+
+For a fixed-wing ground-only control-surface response check with a SIYI RTSP
+camera and HM30 telemetry, keep the plane disarmed and run the plane UI in
+manual mode. The simplified panel defaults to
+`rtsp://192.168.144.25:8554/main.264` and Mission Planner-style
+`udpcl:192.168.144.12:19856`, so the normal flow is `Connect Video`, drag a
+custom target box, then press `Surface Test`. The equivalent terminal command
+uses pymavlink's `udpout:` spelling:
+
+```bash
+python tools/sitl_track_target.py \
+  --enable-guidance \
+  --surface-test \
+  --vehicle plane \
+  --mavlink udpout:192.168.144.12:19856 \
+  --camera-dir logs/ui/camera_frames \
+  --tracking-mode custom \
+  --selection-file logs/ui/custom_selection.json \
+  --timeout-s 30
+```
+
+`--surface-test` switches the plane to `FBWA`, tracks the selected target, and
+sends bounded roll/pitch RC overrides with throttle held at zero. Watch the
+simulated control surfaces and the log fields `roll_pwm`, `pitch_pwm`, and
+`throttle_pwm`; in this mode `throttle_pwm` remains `1000`.
 
 The default quadcopter test world is at `simulation/worlds/vulture_x_test.sdf`. It contains
 an ArduPilot-controlled Iris-with-gimbal model from the ArduPilot Gazebo plugin,
