@@ -202,7 +202,7 @@ VULTURE_X_ALLOW_SITL_ARM=1 python tools/sitl_arm_takeoff.py \
 ```
 
 The plane helper follows the official ArduPilot Gazebo Zephyr demo pattern:
-switch to `FBWA`, arm, apply `RC3=1800` throttle, then switch to `CIRCLE` after
+switch to `FBWA`, arm, keep applying `RC3=1800` throttle, then switch to `AUTO` after
 the model starts rolling. It is not a vertical takeoff. It is simulation-only
 and still requires the explicit `VULTURE_X_ALLOW_SITL_ARM=1` operator flag.
 The helper sends MAVLink from system id `255` by default because ArduPilot only
@@ -264,9 +264,9 @@ target motion. Open the
 printed `vulture_x_ui_lan_url` from another device on the same network. Anyone
 who can reach that URL can operate the local SITL panel.
 
-The UI includes a plane-only `Plane Takeoff` button that runs the guarded
-FBWA/RC3-throttle/CIRCLE SITL helper. It is still an explicit operator action
-and is intended for local SITL only.
+The UI includes a plane-only `Plane Takeoff` button only in simulator mode. It
+runs the guarded FBWA/RC3-throttle/AUTO SITL helper as an explicit operator
+action and is never exposed for manual/hardware operation.
 
 The UI target mover changes only the simulated `target_marker` pose inside the
 existing test area. The quad target is a high-contrast orange UAV-shaped visual model
@@ -280,39 +280,38 @@ target motion, so the banner is a stable first lock target unless the operator
 explicitly presses `Move Target`. Steering still requires the drone to
 already be airborne; the steering action itself does not arm or take off. The
 steering section lets the operator choose banner tracking or a custom
-UI-selected target, set forward speed,
-vertical climb/descent speed, vertical image-error gain, and command rate for
-the timed SITL steering helper. For a custom target, drag a box on the camera
-frame, switch tracking mode to custom selection, and start steering. The camera
-view has a stream refresh FPS control and a rendered center-box overlay so the
-operator can see whether the tracked target is being driven toward frame center.
+UI-selected target, set command rate, and tune fixed-wing response through the
+`Fixed-Wing Tracking Tuning` panel. For a custom target, drag a box on the
+camera frame, switch tracking mode to custom selection, and start steering. The
+camera view has a stream refresh FPS control and a rendered center-box overlay
+so the operator can see whether the tracked target is being driven toward frame
+center.
 The overlay is drawn only on the served preview image after tracking has already
 read the source frame, so it does not become part of the selected ROI or detector
 input.
 
 The quad steering panel clamps forward speed to `5 m/s`, vertical speed to
-`5 m/s`, and vertical gain to `8.0`. The fixed-wing SITL steering path clamps
-ArduPlane guided airspeed to `20 m/s`, vertical speed to `10 m/s`, vertical gain
-to `80.0`, pitch to `40 degrees`, far-target pitch gain to `0.8`, near-target
-pitch gain to `3.0`, below-center pitch-down boost to `0.7`, pitch smoothing to
-`0.25`, and pitch change to `3 degrees` per camera update. Plane visual steering
-also sends a `20 m/s` airspeed target and uses an FBWA throttle governor with
-`0.55` cruise throttle, `0.25` minimum throttle, and `0.80` maximum throttle
-instead of holding throttle fixed during descents. These controls are
-simulation-only tuning knobs; the helper requires the vehicle to be airborne,
-switches fixed-wing steering to `FBWA` with bounded RC attitude overrides, and
-stops pursuit commands on target loss. Fixed-wing tracking uses
+`5 m/s`, and vertical gain to `8.0`. The fixed-wing steering path keeps
+ArduPlane in `FBWA` and sends bounded `RC_CHANNELS_OVERRIDE` roll, pitch,
+throttle, and neutral yaw commands. Target airspeed is passed through
+`--plane-airspeed-mps` and used by the existing FBWA throttle governor; it is
+not sent through the quad `--forward-mps` path. The WebUI writes live tuning to
+`logs/ui/tracking_tuning.json` atomically, and the tracking helper reloads valid
+changes without restarting. The gain preview graph uses apparent bounding-box
+proximity only; it is not physical range. Fixed-wing tracking uses
 perspective-corrected image error for roll/pitch centering, estimates target
 proximity from bounding-box apparent size, smooths sudden bbox jumps, filters
 pitch commands, and reduces throttle when measured airspeed rises above the
-target.
+target. On stale video, heartbeat timeout, disarm, flight-mode change, target
+loss beyond `plane_loss_hold_s`, low valid altitude, or persistent low valid
+airspeed, the helper releases RC override and stops without changing mode.
 
 For a fixed-wing ground-only control-surface response check with a SIYI RTSP
 camera and HM30 telemetry, keep the plane disarmed and run the plane UI in
 manual mode. The simplified panel defaults to
 `rtsp://192.168.144.25:8554/main.264` and Mission Planner-style
 `udpcl:192.168.144.12:19856`, so the normal flow is `Connect Video`, drag a
-custom target box, then press `Surface Test`. The equivalent terminal command
+custom target box, then press `Ground Test (thr 0)`. The equivalent terminal command
 uses pymavlink's `udpout:` spelling:
 
 ```bash
@@ -327,10 +326,11 @@ python tools/sitl_track_target.py \
   --timeout-s 30
 ```
 
-`--surface-test` switches the plane to `FBWA`, tracks the selected target, and
-sends bounded roll/pitch RC overrides with throttle held at zero. Watch the
-simulated control surfaces and the log fields `roll_pwm`, `pitch_pwm`, and
-`throttle_pwm`; in this mode `throttle_pwm` remains `1000`.
+`--surface-test` requires `FBWA`, tracks the selected target, and sends bounded
+roll/pitch RC overrides with throttle held at zero. The separate simulator
+`Start Tracking (thr 80)` UI action runs the normal tracking path with throttle
+held at 80% for now and keeps running until `Stop Steering`. Watch the log fields `roll_pwm`, `pitch_pwm`, and
+`throttle_pwm`.
 
 The default quadcopter test world is at `simulation/worlds/vulture_x_test.sdf`. It contains
 an ArduPilot-controlled Iris-with-gimbal model from the ArduPilot Gazebo plugin,

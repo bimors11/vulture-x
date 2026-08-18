@@ -57,14 +57,18 @@ bridging, and target motion disconnected until the operator starts or connects
 them from the panel.
 
 `-plane` uses the same ArduPilot checkout, `ArduPlane`, the `gazebo-zephyr`
-frame, and `simulation/worlds/vulture_x_plane.sdf`. It is a simulation
-environment profile only. The UI includes a SITL-only fixed-wing steering
-helper that switches an already-armed ArduPlane instance to `FBWA` and uses
-bounded RC roll/pitch overrides plus an airspeed-based throttle governor.
-Fixed-wing guidance is still not
-implemented in the main Vulture-X package.
+frame, and `simulation/worlds/vulture_x_plane.sdf`. The fixed-wing steering
+helper requires `FBWA` and uses bounded `RC_CHANNELS_OVERRIDE` roll, pitch,
+throttle, and neutral yaw commands. In simulator mode it may switch an
+already-armed SITL plane to `FBWA` as a convenience. In manual/hardware mode it
+blocks unless the aircraft is already armed and already in `FBWA`.
 
-The current Vulture-X milestone cannot connect to this endpoint. The next Codex
-agent must first implement and mock-test heartbeat, identity validation,
-telemetry, ACK correlation, timeouts, and clean shutdown. Its first real SITL
-connection must be read-only.
+The plane takeoff helper is simulator-only. The WebUI must not run
+`tools/sitl_arm_takeoff.py` in manual/hardware mode, and no hardware arming or
+takeoff replacement is provided.
+
+Fixed-wing steering fails safe by releasing RC override and stopping, without
+switching modes or commanding RTL/LOITER, on stale video, heartbeat timeout,
+disarm, flight-mode change, sustained target loss after `plane_loss_hold_s`,
+below-minimum tracking altitude when altitude telemetry is valid, or persistent
+low airspeed when aircraft minimum airspeed is known.

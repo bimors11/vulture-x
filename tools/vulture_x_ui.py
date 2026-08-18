@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E501
 """Local web control panel for Vulture-X SITL/Gazebo testing."""
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ LOG_DIR = REPO_ROOT / "logs" / "ui"
 CAMERA_DIR = LOG_DIR / "camera_frames"
 SELECTION_PATH = LOG_DIR / "custom_selection.json"
 DEMAND_STATE_PATH = LOG_DIR / "tracking_demand.json"
+TRACKING_TUNING_PATH = LOG_DIR / "tracking_tuning.json"
 PLANE_PARAM_CACHE_PATH = LOG_DIR / "plane_params_cache.json"
 HEAD_DETECTION_MAX_WIDTH = 420
 SIM_MAVLINK_ENDPOINT = os.environ.get(
@@ -76,19 +78,21 @@ MIN_FIXED_WING_RELATIVE_ALT_M = 15.0
 MAX_FIXED_WING_PITCH_DEG = 40.0
 MAX_FIXED_WING_ROLL_DEG = 35.0
 DEFAULT_FIXED_WING_VERTICAL_GAIN = 52.0
-DEFAULT_FIXED_WING_CENTERING_GAIN = 1.15
-DEFAULT_FIXED_WING_NEAR_CENTERING_GAIN = 2.15
-DEFAULT_FIXED_WING_DAMPING_GAIN = 0.22
-DEFAULT_FIXED_WING_NEAR_DAMPING_GAIN = 0.45
-DEFAULT_FIXED_WING_PITCH_GAIN_SCALE = 1.10
-DEFAULT_FIXED_WING_PITCH_NEAR_GAIN_SCALE = 1.45
-DEFAULT_FIXED_WING_FAR_CONTROL_SCALE = 0.55
+DEFAULT_FIXED_WING_CENTERING_GAIN = 1.55
+DEFAULT_FIXED_WING_NEAR_CENTERING_GAIN = 2.65
+DEFAULT_FIXED_WING_DAMPING_GAIN = 0.14
+DEFAULT_FIXED_WING_NEAR_DAMPING_GAIN = 0.30
+DEFAULT_FIXED_WING_PITCH_GAIN_SCALE = 1.20
+DEFAULT_FIXED_WING_PITCH_NEAR_GAIN_SCALE = 1.60
+DEFAULT_FIXED_WING_FAR_CONTROL_SCALE = 0.72
 DEFAULT_FIXED_WING_PITCH_BELOW_BOOST = 0.25
-DEFAULT_FIXED_WING_PITCH_FILTER_ALPHA = 0.25
+DEFAULT_FIXED_WING_PITCH_FILTER_ALPHA = 0.45
 DEFAULT_FIXED_WING_MAX_PITCH_STEP_DEG = 2.0
-DEFAULT_FIXED_WING_MAX_ROLL_STEP_DEG = 3.0
+DEFAULT_FIXED_WING_MAX_ROLL_STEP_DEG = 6.0
 DEFAULT_FIXED_WING_LOSS_HOLD_S = 1.5
-DEFAULT_SIM_SURFACE_TEST_THROTTLE = 0.80
+DEFAULT_SIM_TRACKING_THROTTLE = 0.80
+DEFAULT_GROUND_TEST_THROTTLE = 0.0
+DEFAULT_MAX_FRAME_AGE_MS = 750.0
 CAMERA_STREAM_ENABLE_RETRY_S = (0.0, 1.0, 2.5, 5.0, 8.0)
 CAMERA_START_WAIT_S = 5.0
 HEAD_DETECTION_CACHE: dict[str, object] = {"key": None, "heads": []}
@@ -166,6 +170,114 @@ VEHICLE_PROFILES = {
     ),
 }
 DEFAULT_VEHICLE_MODE = "quad"
+
+PLANE_TUNING_DEFAULTS: dict[str, float] = {
+    "plane_airspeed_mps": 20.0,
+    "vertical_gain": DEFAULT_FIXED_WING_VERTICAL_GAIN,
+    "plane_centering_gain": DEFAULT_FIXED_WING_CENTERING_GAIN,
+    "plane_near_centering_gain": DEFAULT_FIXED_WING_NEAR_CENTERING_GAIN,
+    "plane_roll_gain_scale": 1.75,
+    "plane_pitch_gain_scale": DEFAULT_FIXED_WING_PITCH_GAIN_SCALE,
+    "plane_pitch_near_gain_scale": DEFAULT_FIXED_WING_PITCH_NEAR_GAIN_SCALE,
+    "plane_error_deadband": 0.015,
+    "plane_lead_s": 0.0,
+    "plane_damping_gain": DEFAULT_FIXED_WING_DAMPING_GAIN,
+    "plane_near_damping_gain": DEFAULT_FIXED_WING_NEAR_DAMPING_GAIN,
+    "plane_pitch_filter_alpha": DEFAULT_FIXED_WING_PITCH_FILTER_ALPHA,
+    "plane_max_pitch_step_deg": DEFAULT_FIXED_WING_MAX_PITCH_STEP_DEG,
+    "plane_max_roll_step_deg": DEFAULT_FIXED_WING_MAX_ROLL_STEP_DEG,
+    "max_plane_roll_deg": MAX_FIXED_WING_ROLL_DEG,
+    "max_plane_pitch_deg": MAX_FIXED_WING_PITCH_DEG,
+    "plane_near_pitch_down_limit_deg": MAX_FIXED_WING_PITCH_DEG,
+    "plane_far_control_scale": DEFAULT_FIXED_WING_FAR_CONTROL_SCALE,
+    "plane_near_control_scale": 1.0,
+    "plane_camera_hfov_deg": 70.0,
+    "plane_proximity_far_size": 0.025,
+    "plane_proximity_near_size": 0.16,
+    "plane_throttle": 0.55,
+    "plane_throttle_airspeed_gain": 0.04,
+    "plane_min_throttle": 0.25,
+    "plane_max_throttle": 0.80,
+    "plane_near_throttle_reduction": 0.0,
+    "plane_pitch_below_center_boost": DEFAULT_FIXED_WING_PITCH_BELOW_BOOST,
+    "plane_loss_hold_s": DEFAULT_FIXED_WING_LOSS_HOLD_S,
+    "min_tracking_alt_m": MIN_FIXED_WING_RELATIVE_ALT_M,
+    "airspeed_low_persistence_s": 2.0,
+}
+
+PLANE_TUNING_RANGES: dict[str, tuple[float, float]] = {
+    "plane_airspeed_mps": (5.0, 40.0),
+    "vertical_gain": (0.0, MAX_FIXED_WING_VERTICAL_GAIN),
+    "plane_centering_gain": (0.0, 4.0),
+    "plane_near_centering_gain": (0.0, 4.0),
+    "plane_roll_gain_scale": (0.0, 3.0),
+    "plane_pitch_gain_scale": (0.0, 3.0),
+    "plane_pitch_near_gain_scale": (0.0, 5.0),
+    "plane_error_deadband": (0.0, 0.2),
+    "plane_lead_s": (0.0, 1.0),
+    "plane_damping_gain": (0.0, 3.0),
+    "plane_near_damping_gain": (0.0, 3.0),
+    "plane_pitch_filter_alpha": (0.05, 0.8),
+    "plane_max_pitch_step_deg": (1.0, 10.0),
+    "plane_max_roll_step_deg": (1.0, 10.0),
+    "max_plane_roll_deg": (1.0, MAX_FIXED_WING_ROLL_DEG),
+    "max_plane_pitch_deg": (1.0, MAX_FIXED_WING_PITCH_DEG),
+    "plane_near_pitch_down_limit_deg": (0.0, MAX_FIXED_WING_PITCH_DEG),
+    "plane_far_control_scale": (0.1, 1.0),
+    "plane_near_control_scale": (0.1, 1.0),
+    "plane_camera_hfov_deg": (20.0, 140.0),
+    "plane_proximity_far_size": (0.001, 0.5),
+    "plane_proximity_near_size": (0.002, 0.8),
+    "plane_throttle": (0.0, 1.0),
+    "plane_throttle_airspeed_gain": (0.0, 0.2),
+    "plane_min_throttle": (0.0, 1.0),
+    "plane_max_throttle": (0.0, 1.0),
+    "plane_near_throttle_reduction": (0.0, 0.5),
+    "plane_pitch_below_center_boost": (0.0, 3.0),
+    "plane_loss_hold_s": (0.0, 5.0),
+    "min_tracking_alt_m": (0.0, 200.0),
+    "airspeed_low_persistence_s": (0.2, 10.0),
+}
+
+
+def clamp_plane_tuning_values(values: dict[str, object]) -> dict[str, float]:
+    result = dict(PLANE_TUNING_DEFAULTS)
+    for key, raw_value in values.items():
+        if key not in PLANE_TUNING_RANGES:
+            continue
+        result[key] = float(raw_value)
+    for key, (lower, upper) in PLANE_TUNING_RANGES.items():
+        result[key] = max(lower, min(upper, result[key]))
+    if result["plane_proximity_near_size"] <= result["plane_proximity_far_size"]:
+        result["plane_proximity_near_size"] = min(0.8, result["plane_proximity_far_size"] + 0.001)
+    if result["plane_max_throttle"] < result["plane_min_throttle"]:
+        result["plane_max_throttle"] = result["plane_min_throttle"]
+    return result
+
+
+def current_tuning_payload() -> dict[str, object]:
+    try:
+        payload = json.loads(TRACKING_TUNING_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return {"revision": 0, "values": dict(PLANE_TUNING_DEFAULTS)}
+    if not isinstance(payload, dict) or not isinstance(payload.get("values"), dict):
+        return {"revision": 0, "values": dict(PLANE_TUNING_DEFAULTS)}
+    return {
+        "revision": int(payload.get("revision", 0)),
+        "values": clamp_plane_tuning_values(payload["values"]),
+    }
+
+
+def write_tracking_tuning(values: dict[str, object]) -> dict[str, object]:
+    current = current_tuning_payload()
+    applied = clamp_plane_tuning_values({**current["values"], **values})
+    revision = int(current["revision"]) + 1
+    payload = {"ok": True, "revision": revision, "values": applied}
+    tmp_path = TRACKING_TUNING_PATH.with_suffix(TRACKING_TUNING_PATH.suffix + ".tmp")
+    TRACKING_TUNING_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    tmp_path.replace(TRACKING_TUNING_PATH)
+    return payload
 
 
 class MavlinkStatusMonitor:
@@ -344,7 +456,7 @@ HTML = r"""<!doctype html>
     }
     .top-actions {
       display: grid;
-      grid-template-columns: 1.35fr 1fr 1fr;
+      grid-template-columns: 1.2fr 1.2fr 1fr 1fr;
       gap: 10px;
       margin-bottom: 18px;
     }
@@ -405,6 +517,53 @@ HTML = r"""<!doctype html>
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 10px;
       margin-bottom: 10px;
+    }
+    .tuning-grid { display: grid; gap: 12px; }
+    details.tuning-group {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      background: #181d1f;
+    }
+    details.tuning-group > summary {
+      cursor: pointer;
+      font-weight: 800;
+      margin-bottom: 8px;
+    }
+    .tuning-field {
+      display: grid;
+      grid-template-columns: 160px minmax(110px, 1fr) 82px;
+      gap: 10px;
+      align-items: center;
+      padding: 8px 0;
+      border-top: 1px solid #2a3336;
+    }
+    .tuning-field:first-of-type { border-top: 0; }
+    .tuning-field small {
+      grid-column: 1 / -1;
+      color: var(--muted);
+      margin-top: -4px;
+    }
+    .tuning-field input[type="range"] { width: 100%; padding: 0; }
+    .tuning-actions {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .tuning-live {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px 14px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .graph-panel canvas {
+      width: 100%;
+      height: 160px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #101315;
     }
     .camera-wrap {
       display: grid;
@@ -478,8 +637,11 @@ HTML = r"""<!doctype html>
         <h2>Quick Actions</h2>
         <div class="top-actions">
           <button class="primary" onclick="connectVideo()">Connect Video</button>
-          <button id="surface-test-btn" class="secondary" onclick="surfaceTest()">
-            Surface Test
+          <button id="tracking-btn" class="primary" onclick="steer()">
+            Start Tracking (thr 80)
+          </button>
+          <button id="ground-test-btn" class="secondary" onclick="groundTest()">
+            Ground Test (thr 0)
           </button>
           <button class="danger" onclick="post('/api/stop_steering')">Stop Steering</button>
         </div>
@@ -529,9 +691,6 @@ HTML = r"""<!doctype html>
             <input id="selection-status" value="none" readonly>
           </label>
         </div>
-        <label>Duration seconds
-          <input id="duration" type="number" min="3" max="120" value="20">
-        </label>
         <div id="quad-fields" class="vehicle-fields">
           <div class="field-title">Quad Guidance</div>
           <div class="inline-fields">
@@ -550,83 +709,22 @@ HTML = r"""<!doctype html>
           </div>
         </div>
         <div id="plane-fields" class="vehicle-fields" hidden>
-          <div class="field-title">Plane Guidance</div>
-          <div class="inline-fields">
-          <label>Forward speed m/s
-            <input id="plane-forward-speed" type="number" min="0" max="20" step="0.1" value="20.0">
-          </label>
+          <div class="field-title">Fixed-Wing Tracking Tuning</div>
           <label>Tracking Hz
             <input id="plane-command-rate" type="number" min="1" max="60" step="1" value="30">
           </label>
-          <label>Vertical speed m/s
-            <input id="plane-vertical-speed" type="number" min="0" max="10" step="0.1" value="10.0">
-          </label>
-          <label>Vertical gain
-            <input id="plane-vertical-gain" type="number" min="0" max="80" step="1" value="52">
-          </label>
-          <label>Centering gain
-            <input id="plane-centering-gain" type="number" min="0" max="4" step="0.05" value="1.15">
-          </label>
-          <label>Near centering gain
-            <input
-              id="plane-near-centering-gain" type="number" min="0" max="4"
-              step="0.05" value="2.15"
-            >
-          </label>
-          <label>Damping gain
-            <input id="plane-damping-gain" type="number" min="0" max="3" step="0.01" value="0.22">
-          </label>
-          <label>Near damping gain
-            <input
-              id="plane-near-damping-gain" type="number" min="0" max="3"
-              step="0.01" value="0.45"
-            >
-          </label>
-          <label>Far control scale
-            <input
-              id="plane-far-control-scale" type="number" min="0.1" max="1"
-              step="0.05" value="0.55"
-            >
-          </label>
-          <label>Max plane pitch deg
-            <input id="max-plane-pitch" type="number" min="0" max="45" step="1" value="40">
-          </label>
-          <label>Far pitch gain
-            <input id="plane-pitch-gain" type="number" min="0" max="3" step="0.1" value="1.10">
-          </label>
-          <label>Near pitch gain
-            <input id="plane-pitch-near-gain" type="number" min="0" max="5" step="0.1" value="1.45">
-          </label>
-          <label>Pitch down boost
-            <input
-              id="plane-pitch-below-boost" type="number" min="0" max="3" step="0.1" value="0.25"
-            >
-          </label>
-          <label>Pitch smoothing
-            <input
-              id="plane-pitch-filter-alpha" type="number" min="0.05" max="0.8"
-              step="0.05" value="0.25"
-            >
-          </label>
-          <label>Max pitch step deg
-            <input
-              id="plane-max-pitch-step" type="number" min="1" max="8" step="0.5"
-              value="2.0"
-            >
-          </label>
-          <label>Max roll step deg
-            <input
-              id="plane-max-roll-step" type="number" min="1" max="10" step="0.5"
-              value="3.0"
-            >
-          </label>
-          <label>Loss hold s
-            <input
-              id="plane-loss-hold" type="number" min="0" max="5" step="0.1"
-              value="1.5"
-            >
-          </label>
+          <div class="tuning-grid" id="plane-tuning"></div>
+          <div class="tuning-actions">
+            <button class="primary" type="button" onclick="applyTuning()">APPLY TUNING</button>
+            <button type="button" onclick="revertTuning()">REVERT</button>
+            <input id="tuning-state" value="Applied" readonly>
           </div>
+          <div class="graph-panel">
+            <h2>Gain Schedule Preview</h2>
+            <canvas id="gain-preview" width="520" height="160"></canvas>
+            <p class="muted">Target proximity is based on apparent bounding-box size, not physical range.</p>
+          </div>
+          <div class="tuning-live" id="tuning-live"></div>
         </div>
         <div class="controls">
           <button onclick="clearSelection()">Clear Selection</button>
@@ -659,9 +757,171 @@ HTML = r"""<!doctype html>
   <script>
     let currentVehicleMode = 'quad';
     let currentVideoSource = 'rtsp';
+    let appliedTuning = {};
+    let pendingTuning = {};
+    const tuningFields = [
+      ['Basic', true, [
+        ['plane_airspeed_mps', 'Target Airspeed', 5, 40, 0.1, 'Target FBWA airspeed request used by the throttle governor.'],
+        ['vertical_gain', 'Overall Response', 0, 80, 1, 'Technical: vertical_gain. Shared roll/pitch image response.'],
+        ['plane_centering_gain', 'Centering Gain', 0, 4, 0.05, 'Technical: plane_centering_gain. Moves the target toward the crosshair.'],
+        ['plane_damping_gain', 'Damping', 0, 3, 0.01, 'Technical: plane_damping_gain. Opposes image-error rate.'],
+        ['max_plane_roll_deg', 'Max Roll', 1, 35, 1, 'Technical: max_plane_roll_deg. Additional Vulture-X limit.'],
+        ['max_plane_pitch_deg', 'Max Pitch', 1, 40, 1, 'Technical: max_plane_pitch_deg. Additional Vulture-X limit.'],
+        ['plane_pitch_filter_alpha', 'Command Smoothing', 0.05, 0.8, 0.05, 'Technical: plane_pitch_filter_alpha.'],
+      ]],
+      ['Tracking Response', true, [
+        ['plane_near_centering_gain', 'Near Target Centering', 0, 4, 0.05, 'Technical: plane_near_centering_gain.'],
+        ['plane_roll_gain_scale', 'Roll Response', 0, 3, 0.05, 'Technical: plane_roll_gain_scale.'],
+        ['plane_pitch_gain_scale', 'Pitch Response', 0, 3, 0.05, 'Technical: plane_pitch_gain_scale.'],
+        ['plane_pitch_near_gain_scale', 'Near Target Pitch Response', 0, 5, 0.05, 'Technical: plane_pitch_near_gain_scale.'],
+        ['plane_error_deadband', 'Deadband', 0, 0.2, 0.001, 'Technical: plane_error_deadband.'],
+        ['plane_lead_s', 'Prediction / Lead', 0, 1, 0.01, 'Technical: plane_lead_s.'],
+      ]],
+      ['Damping & Smoothing', false, [
+        ['plane_near_damping_gain', 'Near Target Damping', 0, 3, 0.01, 'Technical: plane_near_damping_gain.'],
+        ['plane_max_pitch_step_deg', 'Max Pitch Change / Frame', 1, 8, 0.5, 'Technical: plane_max_pitch_step_deg.'],
+        ['plane_max_roll_step_deg', 'Max Roll Change / Frame', 1, 10, 0.5, 'Technical: plane_max_roll_step_deg.'],
+      ]],
+      ['Near Target', false, [
+        ['plane_near_pitch_down_limit_deg', 'Near Pitch Down Limit', 0, 40, 1, 'Technical: plane_near_pitch_down_limit_deg.'],
+        ['plane_far_control_scale', 'Far Control Scale', 0.1, 1, 0.05, 'Technical: plane_far_control_scale.'],
+        ['plane_near_control_scale', 'Near Control Scale', 0.1, 1, 0.05, 'Technical: plane_near_control_scale.'],
+      ]],
+      ['Airspeed & Throttle', false, [
+        ['plane_throttle', 'Cruise Throttle', 0, 1, 0.01, 'Technical: plane_throttle.'],
+        ['plane_throttle_airspeed_gain', 'Airspeed Correction Gain', 0, 0.2, 0.005, 'Technical: plane_throttle_airspeed_gain.'],
+        ['plane_min_throttle', 'Minimum Throttle', 0, 1, 0.01, 'Technical: plane_min_throttle.'],
+        ['plane_max_throttle', 'Maximum Throttle', 0, 1, 0.01, 'Technical: plane_max_throttle.'],
+        ['plane_near_throttle_reduction', 'Near Target Throttle Reduction', 0, 0.5, 0.01, 'Technical: plane_near_throttle_reduction.'],
+      ]],
+      ['Camera / Target Geometry', false, [
+        ['plane_camera_hfov_deg', 'Camera HFOV', 20, 140, 1, 'Technical: plane_camera_hfov_deg.'],
+        ['plane_proximity_far_size', 'Far Target Size', 0.001, 0.5, 0.001, 'Technical: plane_proximity_far_size. Apparent image size only.'],
+        ['plane_proximity_near_size', 'Near Target Size', 0.002, 0.8, 0.001, 'Technical: plane_proximity_near_size. Apparent image size only.'],
+      ]],
+      ['Safety', false, [
+        ['plane_loss_hold_s', 'Loss Hold', 0, 5, 0.1, 'Technical: plane_loss_hold_s.'],
+        ['min_tracking_alt_m', 'Minimum Tracking Altitude', 0, 200, 1, 'Technical: min_tracking_alt_m. Safety gate only.'],
+        ['airspeed_low_persistence_s', 'Low Airspeed Persistence', 0.2, 10, 0.1, 'Technical: airspeed_low_persistence_s.'],
+      ]],
+    ];
+    function allTuningKeys() {
+      return tuningFields.flatMap(group => group[2].map(field => field[0]));
+    }
     function activeNumber(id, fallback) {
       const element = document.getElementById(id);
       return encodeURIComponent(element ? (element.value || fallback) : fallback);
+    }
+    function tuningValue(key, fallback) {
+      const value = pendingTuning[key] ?? appliedTuning[key] ?? fallback;
+      return encodeURIComponent(value);
+    }
+    function buildTuningPanel() {
+      const root = document.getElementById('plane-tuning');
+      if (!root || root.childElementCount) return;
+      root.innerHTML = tuningFields.map(([group, open, fields]) => `
+        <details class="tuning-group" ${open ? 'open' : ''}>
+          <summary>${group}</summary>
+          ${fields.map(([key, label, min, max, step, help]) => `
+            <div class="tuning-field">
+              <label for="tune-${key}" title="${key}">${label}</label>
+              <input id="tune-${key}" data-tune="${key}" type="range" min="${min}" max="${max}" step="${step}">
+              <input id="num-${key}" data-tune-number="${key}" type="number" min="${min}" max="${max}" step="${step}">
+              <small>${help}</small>
+            </div>
+          `).join('')}
+        </details>
+      `).join('');
+      root.querySelectorAll('[data-tune]').forEach((slider) => {
+        slider.addEventListener('input', () => setPendingTuning(slider.dataset.tune, slider.value));
+      });
+      root.querySelectorAll('[data-tune-number]').forEach((input) => {
+        input.addEventListener('input', () => setPendingTuning(input.dataset.tuneNumber, input.value));
+      });
+    }
+    function setPendingTuning(key, value) {
+      pendingTuning[key] = Number(value);
+      syncTuningInputs();
+      markTuning('Pending changes');
+      drawGainPreview();
+    }
+    function syncTuningInputs() {
+      for (const key of allTuningKeys()) {
+        const value = pendingTuning[key] ?? appliedTuning[key];
+        if (value === undefined) continue;
+        const slider = document.getElementById('tune-' + key);
+        const number = document.getElementById('num-' + key);
+        if (slider && document.activeElement !== slider) slider.value = value;
+        if (number && document.activeElement !== number) number.value = value;
+      }
+    }
+    function markTuning(text) {
+      const element = document.getElementById('tuning-state');
+      if (element) element.value = text;
+    }
+    async function loadTuning() {
+      buildTuningPanel();
+      const response = await fetch('/api/tracking_tuning');
+      const payload = await response.json();
+      appliedTuning = payload.values || {};
+      pendingTuning = {...appliedTuning};
+      syncTuningInputs();
+      markTuning('Applied');
+      drawGainPreview();
+    }
+    async function applyTuning() {
+      const response = await fetch('/api/tracking_tuning', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(pendingTuning)
+      });
+      const payload = await response.json();
+      if (payload.ok) {
+        appliedTuning = payload.values || {};
+        pendingTuning = {...appliedTuning};
+        syncTuningInputs();
+        markTuning('Applied r' + payload.revision);
+      } else {
+        markTuning('Rejected');
+      }
+      drawGainPreview();
+    }
+    function revertTuning() {
+      pendingTuning = {...appliedTuning};
+      syncTuningInputs();
+      markTuning('Applied');
+      drawGainPreview();
+    }
+    function drawGainPreview() {
+      const canvas = document.getElementById('gain-preview');
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.strokeStyle = '#354044';
+      ctx.beginPath();
+      ctx.moveTo(34, 12); ctx.lineTo(34, h - 24); ctx.lineTo(w - 10, h - 24); ctx.stroke();
+      const v = (key, fallback) => Number(pendingTuning[key] ?? fallback);
+      const curves = [
+        ['#60d394', v('plane_centering_gain', 1.55), v('plane_near_centering_gain', 2.65)],
+        ['#eec643', v('plane_damping_gain', 0.14), v('plane_near_damping_gain', 0.30)],
+        ['#69b7ff', v('plane_pitch_gain_scale', 1.20), v('plane_pitch_near_gain_scale', 1.60)],
+        ['#ff6b6b', v('plane_far_control_scale', 0.55), 1.0],
+      ];
+      curves.forEach(([color, far, near]) => {
+        const maxValue = Math.max(1, far, near);
+        ctx.strokeStyle = color;
+        ctx.beginPath();
+        for (let i = 0; i <= 100; i++) {
+          const p = i / 100;
+          const yValue = (far + (near - far) * p) / maxValue;
+          const x = 34 + p * (w - 44);
+          const y = (h - 24) - yValue * (h - 40);
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      });
     }
     function mavlinkEndpoint() {
       const element = document.getElementById('mavlink-endpoint');
@@ -683,11 +943,10 @@ HTML = r"""<!doctype html>
     async function steer() {
       await startSteering(false);
     }
-    async function surfaceTest() {
+    async function groundTest() {
       await startSteering(true);
     }
     async function startSteering(surfaceTestMode) {
-      const duration = encodeURIComponent(document.getElementById('duration').value || '20');
       const trackingModeInput = document.getElementById('tracking-mode');
       const defaultMode = 'red';
       const mode = encodeURIComponent(
@@ -695,20 +954,19 @@ HTML = r"""<!doctype html>
       );
       const isPlane = currentVehicleMode === 'plane';
       const speed = isPlane
-        ? activeNumber('plane-forward-speed', '20.0')
+        ? '0'
         : activeNumber('quad-forward-speed', '3.0');
       let rate = isPlane
         ? activeNumber('plane-command-rate', '30')
         : activeNumber('quad-command-rate', '30');
       const verticalSpeed = isPlane
-        ? activeNumber('plane-vertical-speed', '10.0')
+        ? '0'
         : activeNumber('quad-vertical-speed', '3.0');
       const verticalGain = isPlane
-        ? activeNumber('plane-vertical-gain', '52')
+        ? tuningValue('vertical_gain', '52')
         : activeNumber('quad-vertical-gain', '3.5');
       let path =
-        '/api/start_steering?duration=' + duration +
-        '&mavlink=' + mavlinkEndpoint() +
+        '/api/start_steering?mavlink=' + mavlinkEndpoint() +
         '&forward_mps=' + speed +
         '&rate_hz=' + rate +
         '&max_down_mps=' + verticalSpeed +
@@ -717,19 +975,21 @@ HTML = r"""<!doctype html>
         '&surface_test=' + (surfaceTestMode ? '1' : '0');
       if (isPlane) {
         path +=
-          '&plane_centering_gain=' + activeNumber('plane-centering-gain', '1.15') +
-          '&plane_near_centering_gain=' + activeNumber('plane-near-centering-gain', '2.15') +
-          '&plane_damping_gain=' + activeNumber('plane-damping-gain', '0.22') +
-          '&plane_near_damping_gain=' + activeNumber('plane-near-damping-gain', '0.45') +
-          '&plane_far_control_scale=' + activeNumber('plane-far-control-scale', '0.55') +
-          '&max_plane_pitch_deg=' + activeNumber('max-plane-pitch', '40') +
-          '&plane_pitch_gain_scale=' + activeNumber('plane-pitch-gain', '1.10') +
-          '&plane_pitch_near_gain_scale=' + activeNumber('plane-pitch-near-gain', '1.45') +
-          '&plane_pitch_below_center_boost=' + activeNumber('plane-pitch-below-boost', '0.25') +
-          '&plane_pitch_filter_alpha=' + activeNumber('plane-pitch-filter-alpha', '0.25') +
-          '&plane_max_pitch_step_deg=' + activeNumber('plane-max-pitch-step', '2.0') +
-          '&plane_max_roll_step_deg=' + activeNumber('plane-max-roll-step', '3.0') +
-          '&plane_loss_hold_s=' + activeNumber('plane-loss-hold', '1.5');
+          '&plane_airspeed_mps=' + tuningValue('plane_airspeed_mps', '20.0') +
+          '&plane_centering_gain=' + tuningValue('plane_centering_gain', '1.55') +
+          '&plane_near_centering_gain=' + tuningValue('plane_near_centering_gain', '2.65') +
+          '&plane_damping_gain=' + tuningValue('plane_damping_gain', '0.14') +
+          '&plane_near_damping_gain=' + tuningValue('plane_near_damping_gain', '0.30') +
+          '&plane_far_control_scale=' + tuningValue('plane_far_control_scale', '0.72') +
+          '&max_plane_roll_deg=' + tuningValue('max_plane_roll_deg', '35') +
+          '&max_plane_pitch_deg=' + tuningValue('max_plane_pitch_deg', '40') +
+          '&plane_pitch_gain_scale=' + tuningValue('plane_pitch_gain_scale', '1.20') +
+          '&plane_pitch_near_gain_scale=' + tuningValue('plane_pitch_near_gain_scale', '1.60') +
+          '&plane_pitch_below_center_boost=' + tuningValue('plane_pitch_below_center_boost', '0.25') +
+          '&plane_pitch_filter_alpha=' + tuningValue('plane_pitch_filter_alpha', '0.25') +
+          '&plane_max_pitch_step_deg=' + tuningValue('plane_max_pitch_step_deg', '2.0') +
+          '&plane_max_roll_step_deg=' + tuningValue('plane_max_roll_step_deg', '6.0') +
+          '&plane_loss_hold_s=' + tuningValue('plane_loss_hold_s', '1.5');
       }
       await post(path);
     }
@@ -781,9 +1041,11 @@ HTML = r"""<!doctype html>
       currentVideoSource = data.video.source || currentVideoSource;
       document.getElementById('quad-fields').hidden = currentVehicleMode !== 'quad';
       document.getElementById('plane-fields').hidden = currentVehicleMode !== 'plane';
-      document.getElementById('surface-test-btn').hidden = currentVehicleMode !== 'plane';
+      document.getElementById('ground-test-btn').hidden = currentVehicleMode !== 'plane';
       document.getElementById('sim-actions').hidden = !data.runtime.simulator;
-      document.getElementById('takeoff-btn').hidden = currentVehicleMode !== 'plane';
+      document.getElementById('takeoff-btn').hidden =
+        currentVehicleMode !== 'plane' || !data.runtime.simulator;
+      updateTuningLive(data.demand || {});
       const endpointInput = document.getElementById('mavlink-endpoint');
       if (endpointInput && document.activeElement !== endpointInput) {
         endpointInput.value = data.mavlink.control_endpoint || endpointInput.value;
@@ -809,6 +1071,25 @@ HTML = r"""<!doctype html>
         data.logs.system +
         (data.logs.takeoff ? '\n\nTakeoff:\n' + data.logs.takeoff : '') +
         (owners ? '\n\nUDP 5600:\n' + owners : '');
+    }
+    function updateTuningLive(demand) {
+      const element = document.getElementById('tuning-live');
+      if (!element) return;
+      const item = (label, value) => `<span>${label}</span><strong>${value ?? '-'}</strong>`;
+      const warn = demand.failsafe ? `control released: ${demand.failsafe_reason}` :
+        (!demand.detected ? 'target lost or searching' : 'tracking');
+      element.innerHTML = [
+        item('Target error X', Number(demand.guided_error_x ?? 0).toFixed(3)),
+        item('Target error Y', Number(demand.guided_error_y ?? 0).toFixed(3)),
+        item('Proximity', Number(demand.target_proximity ?? 0).toFixed(2)),
+        item('Roll command', Number(demand.roll_deg ?? 0).toFixed(1)),
+        item('Pitch command', Number(demand.pitch_deg ?? 0).toFixed(1)),
+        item('Throttle', Number(demand.throttle ?? 0).toFixed(2)),
+        item('Airspeed', demand.airspeed_mps == null ? '-' : Number(demand.airspeed_mps).toFixed(1)),
+        item('Frame age', demand.frame_age_ms == null ? '-' : Number(demand.frame_age_ms).toFixed(0) + ' ms'),
+        item('Revision', demand.tracking_tuning_revision ?? '-'),
+        item('State', warn),
+      ].join('');
     }
     function refreshFrame() {
       const mode = encodeURIComponent(document.getElementById('tracking-mode').value || 'red');
@@ -950,6 +1231,7 @@ HTML = r"""<!doctype html>
     }
     setInterval(poll, 1000);
     installSelectionDrag();
+    loadTuning().catch((error) => markTuning('Rejected'));
     poll();
     refreshFrame();
   </script>
@@ -1252,8 +1534,6 @@ class AppState:
                 "--enable-guidance",
                 "--camera-dir",
                 str(CAMERA_DIR),
-                "--timeout-s",
-                "20",
             ],
             LOG_DIR / "steering.log",
         )
@@ -1336,7 +1616,6 @@ class AppState:
 
     def start_steering(
         self,
-        duration_s: float,
         forward_mps: float,
         rate_hz: float,
         max_down_mps: float,
@@ -1357,6 +1636,8 @@ class AppState:
         tracking_mode: str,
         mavlink_endpoint: str | None = None,
         surface_test: bool = False,
+        plane_airspeed_mps: float = 20.0,
+        max_plane_roll_deg: float = MAX_FIXED_WING_ROLL_DEG,
     ) -> str:
         if mavlink_endpoint is None:
             mavlink_endpoint = self.mavlink_endpoint
@@ -1368,7 +1649,6 @@ class AppState:
             return "steering blocked reason=fixed_wing_guidance_not_implemented"
         if surface_test and self.profile.mode != "plane":
             return "steering blocked reason=surface_test_requires_plane"
-        duration_s = max(3.0, min(120.0, duration_s))
         forward_mps = max(0.0, min(self.profile.max_forward_mps, forward_mps))
         rate_hz = max(1.0, min(60.0, rate_hz))
         max_down_mps = max(0.0, min(self.profile.max_vertical_mps, max_down_mps))
@@ -1378,6 +1658,7 @@ class AppState:
         plane_damping_gain = max(0.0, min(3.0, plane_damping_gain))
         plane_near_damping_gain = max(0.0, min(3.0, plane_near_damping_gain))
         plane_far_control_scale = max(0.1, min(1.0, plane_far_control_scale))
+        max_plane_roll_deg = max(1.0, min(self.profile.max_roll_deg, max_plane_roll_deg))
         max_plane_pitch_deg = max(0.0, min(self.profile.max_pitch_deg, max_plane_pitch_deg))
         plane_pitch_gain_scale = max(0.0, min(3.0, plane_pitch_gain_scale))
         plane_pitch_near_gain_scale = max(0.0, min(5.0, plane_pitch_near_gain_scale))
@@ -1391,6 +1672,37 @@ class AppState:
             plane_max_pitch_step_deg = max(plane_max_pitch_step_deg, 6.0)
             plane_max_roll_step_deg = max(plane_max_roll_step_deg, 8.0)
             plane_loss_hold_s = min(plane_loss_hold_s, 0.25)
+        elif self.profile.mode == "plane" and self.simulator_mode:
+            plane_centering_gain = max(plane_centering_gain, DEFAULT_FIXED_WING_CENTERING_GAIN)
+            plane_near_centering_gain = max(
+                plane_near_centering_gain,
+                DEFAULT_FIXED_WING_NEAR_CENTERING_GAIN,
+            )
+            plane_damping_gain = min(plane_damping_gain, DEFAULT_FIXED_WING_DAMPING_GAIN)
+            plane_near_damping_gain = min(
+                plane_near_damping_gain,
+                DEFAULT_FIXED_WING_NEAR_DAMPING_GAIN,
+            )
+            plane_far_control_scale = max(
+                plane_far_control_scale,
+                DEFAULT_FIXED_WING_FAR_CONTROL_SCALE,
+            )
+            plane_pitch_gain_scale = max(
+                plane_pitch_gain_scale,
+                DEFAULT_FIXED_WING_PITCH_GAIN_SCALE,
+            )
+            plane_pitch_near_gain_scale = max(
+                plane_pitch_near_gain_scale,
+                DEFAULT_FIXED_WING_PITCH_NEAR_GAIN_SCALE,
+            )
+            plane_pitch_filter_alpha = max(
+                plane_pitch_filter_alpha,
+                DEFAULT_FIXED_WING_PITCH_FILTER_ALPHA,
+            )
+            plane_max_roll_step_deg = max(
+                plane_max_roll_step_deg,
+                DEFAULT_FIXED_WING_MAX_ROLL_STEP_DEG,
+            )
         if tracking_mode == "orange":
             tracking_mode = "red"
         if tracking_mode == "person":
@@ -1401,6 +1713,45 @@ class AppState:
             return "steering blocked reason=missing_custom_selection"
         with contextlib.suppress(FileNotFoundError):
             DEMAND_STATE_PATH.unlink()
+        if self.profile.mode == "plane":
+            simulator_throttle_values = (
+                {
+                    "plane_throttle": DEFAULT_SIM_TRACKING_THROTTLE,
+                    "plane_min_throttle": DEFAULT_SIM_TRACKING_THROTTLE,
+                    "plane_max_throttle": DEFAULT_SIM_TRACKING_THROTTLE,
+                    "plane_lead_s": 0.0,
+                    "plane_roll_gain_scale": max(
+                        current_tuning_payload()["values"].get("plane_roll_gain_scale", 0.0),
+                        1.75,
+                    ),
+                }
+                if self.simulator_mode
+                else {}
+            )
+            tuning_payload = write_tracking_tuning(
+                {
+                    "plane_airspeed_mps": plane_airspeed_mps,
+                    "vertical_gain": vertical_gain,
+                    "plane_centering_gain": plane_centering_gain,
+                    "plane_near_centering_gain": plane_near_centering_gain,
+                    "plane_damping_gain": plane_damping_gain,
+                    "plane_near_damping_gain": plane_near_damping_gain,
+                    "plane_far_control_scale": plane_far_control_scale,
+                    "max_plane_roll_deg": max_plane_roll_deg,
+                    "max_plane_pitch_deg": max_plane_pitch_deg,
+                    "plane_pitch_gain_scale": plane_pitch_gain_scale,
+                    "plane_pitch_near_gain_scale": plane_pitch_near_gain_scale,
+                    "plane_pitch_below_center_boost": plane_pitch_below_center_boost,
+                    "plane_pitch_filter_alpha": plane_pitch_filter_alpha,
+                    "plane_max_pitch_step_deg": plane_max_pitch_step_deg,
+                    "plane_max_roll_step_deg": plane_max_roll_step_deg,
+                    "plane_loss_hold_s": plane_loss_hold_s,
+                    **simulator_throttle_values,
+                }
+            )
+            plane_tuning_values = tuning_payload["values"]
+        else:
+            plane_tuning_values = {}
         camera_dir = active_camera_dir()
         if camera_dir is None:
             ready_message = self.ensure_camera_ready()
@@ -1415,10 +1766,10 @@ class AppState:
             mavlink_endpoint,
             "--vehicle",
             self.profile.mode,
+            "--source-system",
+            "255",
             "--camera-dir",
             str(camera_dir),
-            "--timeout-s",
-            str(duration_s),
             "--forward-mps",
             str(forward_mps),
             "--rate-hz",
@@ -1434,43 +1785,58 @@ class AppState:
             "--plane-param-cache-file",
             str(PLANE_PARAM_CACHE_PATH),
         ]
+        if self.simulator_mode:
+            self.steering.command.append("--simulator-mode")
         if self.profile.mode == "plane":
             self.steering.command.extend(
                 [
+                    "--tuning-file",
+                    str(TRACKING_TUNING_PATH),
+                    "--max-frame-age-ms",
+                    str(DEFAULT_MAX_FRAME_AGE_MS),
+                    "--plane-airspeed-mps",
+                    str(plane_tuning_values["plane_airspeed_mps"]),
+                    "--plane-throttle",
+                    str(plane_tuning_values["plane_throttle"]),
+                    "--plane-min-throttle",
+                    str(plane_tuning_values["plane_min_throttle"]),
+                    "--plane-max-throttle",
+                    str(plane_tuning_values["plane_max_throttle"]),
                     "--plane-centering-gain",
-                    str(plane_centering_gain),
+                    str(plane_tuning_values["plane_centering_gain"]),
                     "--plane-near-centering-gain",
-                    str(plane_near_centering_gain),
+                    str(plane_tuning_values["plane_near_centering_gain"]),
                     "--plane-damping-gain",
-                    str(plane_damping_gain),
+                    str(plane_tuning_values["plane_damping_gain"]),
                     "--plane-near-damping-gain",
-                    str(plane_near_damping_gain),
+                    str(plane_tuning_values["plane_near_damping_gain"]),
                     "--plane-far-control-scale",
-                    str(plane_far_control_scale),
+                    str(plane_tuning_values["plane_far_control_scale"]),
+                    "--max-plane-roll-deg",
+                    str(plane_tuning_values["max_plane_roll_deg"]),
                     "--max-plane-pitch-deg",
-                    str(max_plane_pitch_deg),
+                    str(plane_tuning_values["max_plane_pitch_deg"]),
                     "--plane-pitch-gain-scale",
-                    str(plane_pitch_gain_scale),
+                    str(plane_tuning_values["plane_pitch_gain_scale"]),
                     "--plane-pitch-near-gain-scale",
-                    str(plane_pitch_near_gain_scale),
+                    str(plane_tuning_values["plane_pitch_near_gain_scale"]),
                     "--plane-pitch-below-center-boost",
-                    str(plane_pitch_below_center_boost),
+                    str(plane_tuning_values["plane_pitch_below_center_boost"]),
                     "--plane-pitch-filter-alpha",
-                    str(plane_pitch_filter_alpha),
+                    str(plane_tuning_values["plane_pitch_filter_alpha"]),
                     "--plane-max-pitch-step-deg",
-                    str(plane_max_pitch_step_deg),
+                    str(plane_tuning_values["plane_max_pitch_step_deg"]),
                     "--plane-max-roll-step-deg",
-                    str(plane_max_roll_step_deg),
+                    str(plane_tuning_values["plane_max_roll_step_deg"]),
                     "--plane-loss-hold-s",
-                    str(plane_loss_hold_s),
+                    str(plane_tuning_values["plane_loss_hold_s"]),
                 ]
             )
             if surface_test:
                 self.steering.command.append("--surface-test")
-                if self.simulator_mode:
-                    self.steering.command.extend(
-                        ["--surface-test-throttle", str(DEFAULT_SIM_SURFACE_TEST_THROTTLE)]
-                    )
+                self.steering.command.extend(
+                    ["--surface-test-throttle", str(DEFAULT_GROUND_TEST_THROTTLE)]
+                )
         if tracking_mode in {"custom", "head"}:
             self.steering.command.extend(["--selection-file", str(SELECTION_PATH)])
         return self.steering.start()
@@ -1497,6 +1863,8 @@ class AppState:
             return f"takeoff blocked reason={exc}"
         if self.profile.mode != "plane":
             return "takeoff blocked reason=plane_profile_required"
+        if not self.simulator_mode:
+            return "takeoff blocked reason=simulator_only"
         if self.takeoff.running():
             return "takeoff already running"
         self.takeoff.command = [
@@ -1510,6 +1878,42 @@ class AppState:
             "50",
         ]
         return self.takeoff.start()
+
+    def set_plane_auto(self, mavlink_endpoint: str | None = None) -> str:
+        if self.profile.mode != "plane":
+            return "auto skipped reason=plane_profile_required"
+        if not self.simulator_mode:
+            return "auto skipped reason=simulator_only"
+        endpoint = mavlink_endpoint if mavlink_endpoint is not None else self.mavlink_endpoint
+        connection = None
+        try:
+            connection = open_mavlink_connection(
+                endpoint,
+                source_system=255,
+                source_component=203,
+                autoreconnect=False,
+            )
+            send_client_heartbeat(connection)
+            heartbeat = connection.wait_heartbeat(timeout=3.0)
+            if heartbeat is None:
+                return "auto failed reason=heartbeat_timeout"
+            auto_mode = connection.mode_mapping().get("AUTO")
+            if auto_mode is None:
+                return "auto failed reason=auto_mode_unavailable"
+            connection.set_mode(auto_mode)
+            return "auto commanded"
+        except Exception as exc:
+            return f"auto failed reason={type(exc).__name__}"
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def stop_steering(self) -> str:
+        stop_message = self.steering.stop()
+        auto_message = self.set_plane_auto()
+        if auto_message.startswith("auto skipped"):
+            return stop_message
+        return f"{stop_message}; {auto_message}"
 
     def start_gazebo(self) -> str:
         if process_running(self.profile.gazebo_process_pattern):
@@ -2300,6 +2704,7 @@ def status_payload(display_mode: str = "red") -> dict[str, Any]:
         "runtime": {
             "simulator": STATE.simulator_mode,
         },
+        "demand": load_demand_state() or {},
         "selection": selection_payload(),
         "logs": {
             "takeoff": tail(LOG_DIR / "takeoff.log", 40),
@@ -2345,6 +2750,9 @@ class Handler(BaseHTTPRequestHandler):
             display_mode = query.get("mode", ["red"])[0]
             self.send_json(status_payload(display_mode))
             return
+        if parsed.path == "/api/tracking_tuning":
+            self.send_json({"ok": True, **current_tuning_payload()})
+            return
         if parsed.path == "/api/frame.jpg":
             query = parse_qs(parsed.query)
             display_mode = query.get("mode", ["red"])[0]
@@ -2382,26 +2790,27 @@ class Handler(BaseHTTPRequestHandler):
                 message = STATE.start_bridge(video_source, rtsp_url)
             elif parsed.path == "/api/start_steering":
                 mavlink_endpoint = query.get("mavlink", [STATE.mavlink_endpoint])[0]
-                duration = float(query.get("duration", ["20"])[0])
                 forward_mps = float(query.get("forward_mps", ["3.0"])[0])
                 rate_hz = float(query.get("rate_hz", ["30"])[0])
                 max_down_mps = float(query.get("max_down_mps", ["3.0"])[0])
                 vertical_gain = float(query.get("vertical_gain", ["52"])[0])
-                plane_centering_gain = float(query.get("plane_centering_gain", ["1.15"])[0])
+                plane_centering_gain = float(query.get("plane_centering_gain", ["1.55"])[0])
                 plane_near_centering_gain = float(
-                    query.get("plane_near_centering_gain", ["2.15"])[0]
+                    query.get("plane_near_centering_gain", ["2.65"])[0]
                 )
-                plane_damping_gain = float(query.get("plane_damping_gain", ["0.22"])[0])
+                plane_damping_gain = float(query.get("plane_damping_gain", ["0.14"])[0])
                 plane_near_damping_gain = float(
-                    query.get("plane_near_damping_gain", ["0.45"])[0]
+                    query.get("plane_near_damping_gain", ["0.30"])[0]
                 )
                 plane_far_control_scale = float(
-                    query.get("plane_far_control_scale", ["0.55"])[0]
+                    query.get("plane_far_control_scale", ["0.72"])[0]
                 )
+                plane_airspeed_mps = float(query.get("plane_airspeed_mps", ["20.0"])[0])
+                max_plane_roll_deg = float(query.get("max_plane_roll_deg", ["35"])[0])
                 max_plane_pitch_deg = float(query.get("max_plane_pitch_deg", ["40"])[0])
-                plane_pitch_gain_scale = float(query.get("plane_pitch_gain_scale", ["1.10"])[0])
+                plane_pitch_gain_scale = float(query.get("plane_pitch_gain_scale", ["1.20"])[0])
                 plane_pitch_near_gain_scale = float(
-                    query.get("plane_pitch_near_gain_scale", ["1.45"])[0]
+                    query.get("plane_pitch_near_gain_scale", ["1.60"])[0]
                 )
                 plane_pitch_below_center_boost = float(
                     query.get("plane_pitch_below_center_boost", ["0.25"])[0]
@@ -2413,13 +2822,12 @@ class Handler(BaseHTTPRequestHandler):
                     query.get("plane_max_pitch_step_deg", ["2.0"])[0]
                 )
                 plane_max_roll_step_deg = float(
-                    query.get("plane_max_roll_step_deg", ["3.0"])[0]
+                    query.get("plane_max_roll_step_deg", ["6.0"])[0]
                 )
                 plane_loss_hold_s = float(query.get("plane_loss_hold_s", ["1.5"])[0])
                 tracking_mode = query.get("tracking_mode", ["red"])[0]
                 surface_test = query.get("surface_test", ["0"])[0] in {"1", "true", "True"}
                 message = STATE.start_steering(
-                    duration,
                     forward_mps,
                     rate_hz,
                     max_down_mps,
@@ -2440,9 +2848,27 @@ class Handler(BaseHTTPRequestHandler):
                     tracking_mode,
                     mavlink_endpoint,
                     surface_test,
+                    plane_airspeed_mps,
+                    max_plane_roll_deg,
                 )
+            elif parsed.path == "/api/tracking_tuning":
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    raw_body = self.rfile.read(length) if length > 0 else b"{}"
+                    body = json.loads(raw_body.decode("utf-8"))
+                    if not isinstance(body, dict):
+                        raise ValueError("invalid_payload")
+                    payload = write_tracking_tuning(body)
+                    self.send_json(payload)
+                    return
+                except (json.JSONDecodeError, ValueError, OSError) as exc:
+                    self.send_json(
+                        {"ok": False, "reason": type(exc).__name__},
+                        HTTPStatus.BAD_REQUEST,
+                    )
+                    return
             elif parsed.path == "/api/stop_steering":
-                message = STATE.steering.stop()
+                message = STATE.stop_steering()
             elif parsed.path == "/api/start_takeoff":
                 mavlink_endpoint = query.get("mavlink", [STATE.mavlink_endpoint])[0]
                 message = STATE.start_takeoff(mavlink_endpoint)

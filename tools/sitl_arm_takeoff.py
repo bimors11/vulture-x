@@ -151,16 +151,26 @@ def latest_vfr_hud(connection: mavutil.mavfile, timeout_s: float) -> object | No
     deadline = time.monotonic() + timeout_s
     latest = None
     while time.monotonic() < deadline:
-        message = connection.recv_match(type="VFR_HUD", blocking=True, timeout=1)
+        message = connection.recv_match(type="VFR_HUD", blocking=True, timeout=0.1)
         if message is not None:
             latest = message
             break
     return latest
 
 
-def wait_groundspeed(connection: mavutil.mavfile, minimum_mps: float, timeout_s: float) -> bool:
+def wait_groundspeed(
+    connection: mavutil.mavfile,
+    minimum_mps: float,
+    timeout_s: float,
+    keepalive_channels: dict[int, int] | None = None,
+) -> bool:
     deadline = time.monotonic() + timeout_s
+    next_keepalive = 0.0
     while time.monotonic() < deadline:
+        now = time.monotonic()
+        if keepalive_channels is not None and now >= next_keepalive:
+            rc_override(connection, keepalive_channels)
+            next_keepalive = now + 0.25
         message = connection.recv_match(type="VFR_HUD", blocking=True, timeout=1)
         if message is not None and float(message.groundspeed) >= minimum_mps:
             return True
@@ -171,10 +181,16 @@ def wait_relative_altitude(
     connection: mavutil.mavfile,
     minimum_altitude_m: float,
     timeout_s: float,
+    keepalive_channels: dict[int, int] | None = None,
 ) -> bool:
     deadline = time.monotonic() + timeout_s
+    next_keepalive = 0.0
     while time.monotonic() < deadline:
-        message = connection.recv_match(type="GLOBAL_POSITION_INT", blocking=True, timeout=1)
+        now = time.monotonic()
+        if keepalive_channels is not None and now >= next_keepalive:
+            rc_override(connection, keepalive_channels)
+            next_keepalive = now + 0.25
+        message = connection.recv_match(type="GLOBAL_POSITION_INT", blocking=True, timeout=0.1)
         if message is not None and float(message.relative_alt) / 1000.0 >= minimum_altitude_m:
             return True
     return False
@@ -229,7 +245,7 @@ def plane_takeoff(connection: mavutil.mavfile, altitude_m: float, timeout_s: flo
     if fbwa_mode is None:
         print("sitl_takeoff_status=failed reason=fbwa_mode_unavailable", flush=True)
         return 1
-    circle_mode = mode_mapping.get("CIRCLE")
+    auto_mode = mode_mapping.get("AUTO")
 
     print("sitl_takeoff_status=setting_mode vehicle=plane mode=FBWA", flush=True)
     connection.set_mode(fbwa_mode)
@@ -243,8 +259,9 @@ def plane_takeoff(connection: mavutil.mavfile, altitude_m: float, timeout_s: flo
         return 1
 
     print("sitl_takeoff_status=rolling vehicle=plane stage=official_zephyr_rc3_1800", flush=True)
-    rc_override(connection, {1: 1500, 2: 1500, 3: 1800, 4: 1500})
-    if not wait_groundspeed(connection, 6.0, timeout_s):
+    takeoff_channels = {1: 1500, 2: 1500, 3: 1800, 4: 1500}
+    rc_override(connection, takeoff_channels)
+    if not wait_groundspeed(connection, 6.0, timeout_s, takeoff_channels):
         hud = latest_vfr_hud(connection, 2.0)
         groundspeed = getattr(hud, "groundspeed", "unknown") if hud is not None else "unknown"
         print(
@@ -254,22 +271,24 @@ def plane_takeoff(connection: mavutil.mavfile, altitude_m: float, timeout_s: flo
         )
         return 1
 
-    if circle_mode is not None:
-        print("sitl_takeoff_status=setting_mode vehicle=plane mode=CIRCLE", flush=True)
-        connection.set_mode(circle_mode)
-        if not wait_mode(connection, "CIRCLE", timeout_s):
-            print("sitl_takeoff_status=warning reason=circle_mode_timeout", flush=True)
+    if auto_mode is not None:
+        print("sitl_takeoff_status=setting_mode vehicle=plane mode=AUTO", flush=True)
+        connection.set_mode(auto_mode)
+        if not wait_mode(connection, "AUTO", timeout_s):
+            print("sitl_takeoff_status=warning reason=auto_mode_timeout", flush=True)
+    else:
+        print("sitl_takeoff_status=warning reason=auto_mode_unavailable", flush=True)
 
     print("sitl_takeoff_status=climbing vehicle=plane throttle_pwm=1800", flush=True)
-    if not wait_relative_altitude(connection, altitude_m, timeout_s):
+    if not wait_relative_altitude(connection, altitude_m, timeout_s, takeoff_channels):
         print(
             f"sitl_takeoff_status=warning reason=altitude_timeout "
             f"vehicle=plane target_altitude_m={altitude_m}",
             flush=True,
         )
-    rc_override(connection, {1: 1500, 2: 1500, 3: 1800, 4: 1500})
+    rc_override(connection, takeoff_channels)
     print(
-        f"sitl_takeoff_status=commanded vehicle=plane mode=CIRCLE altitude_m={altitude_m}",
+        f"sitl_takeoff_status=commanded vehicle=plane mode=AUTO altitude_m={altitude_m}",
         flush=True,
     )
     return 0

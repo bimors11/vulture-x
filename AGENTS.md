@@ -8,17 +8,22 @@ These instructions apply to the entire Vulture-X repository.
 `README.md`, `docs/architecture.md`, `docs/safety.md`, and
 `docs/sitl_setup.md` before changing code.
 
-This repository implements the first milestone only. It has synthetic video,
-OpenCV tracking, bounded image guidance, safety policies, a mock vehicle, and
-mission state transitions through `TRACK`. It has no functioning SITL or
-hardware MAVLink client. Do not claim otherwise.
+This repository includes the first milestone package plus local SITL/manual
+helper tools. The package has synthetic video, OpenCV tracking, bounded image
+guidance, safety policies, a mock vehicle, and mission state transitions through
+`TRACK`. The local helper tools include quad SITL `GUIDED` steering and
+fixed-wing ArduPlane `FBWA` steering via bounded `RC_CHANNELS_OVERRIDE`.
+Hardware operation remains manual/operator-gated and must not arm or take off
+autonomously.
 
 ## Product rules
 
 - Keep the product/repository name `vulture-x` and Python package `vulture_x`.
 - The ground laptop performs vision and high-level guidance; there is no
   onboard companion computer in the planned architecture.
-- Use ArduPilot `GUIDED`, never PX4 `OFFBOARD` assumptions.
+- Use ArduPilot `GUIDED` for the quadcopter velocity path and ArduPlane `FBWA`
+  plus `RC_CHANNELS_OVERRIDE` for the fixed-wing tracking path; never use PX4
+  `OFFBOARD` assumptions.
 - Keep MAVLink transport independent of guidance, tracking, and mission code.
 - Keep video sources independent of tracking code.
 - Use Python 3.11+, asyncio, bounded queues, strict types, YAML configuration,
@@ -71,4 +76,3 @@ a report of assumptions and incomplete components.
 
 Do not connect propulsion, perform HIL, or attempt outdoor flight under these
 instructions.
-

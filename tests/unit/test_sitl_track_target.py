@@ -7,7 +7,6 @@ from types import ModuleType
 import cv2
 import numpy as np
 import pytest
-from pymavlink import mavutil
 
 
 def load_tracking_module() -> ModuleType:
@@ -55,6 +54,26 @@ class FakeParamMessage:
         self.param_value = value
 
 
+class FakeHeartbeatMessage:
+    def __init__(self, timestamp_s: float) -> None:
+        self._timestamp = timestamp_s
+
+
+class FakeCachedHeartbeatConnection:
+    def __init__(self, heartbeat: FakeHeartbeatMessage) -> None:
+        self.messages = {"HEARTBEAT": heartbeat}
+
+    def recv_match(
+        self,
+        *,
+        type: str | list[str],
+        blocking: bool,
+        timeout: float,
+    ) -> object | None:
+        del type, blocking, timeout
+        return None
+
+
 class FakeConnection:
     def __init__(self) -> None:
         self.mav = FakeMav()
@@ -73,72 +92,35 @@ class FakeConnection:
         return self.messages.pop(0) if self.messages else None
 
 
-def test_plane_speed_uses_guided_airspeed_command() -> None:
+def test_poll_heartbeat_accepts_new_cached_mavlink_heartbeat() -> None:
     module = load_tracking_module()
-    connection = FakeConnection()
+    heartbeat = FakeHeartbeatMessage(123.0)
+    connection = FakeCachedHeartbeatConnection(heartbeat)
 
-    module.send_plane_speed(connection, 1, 1, 25.0)
+    message, timestamp_s = module.poll_heartbeat(connection, 122.0)
 
-    call = connection.mav.command_int_calls[-1]
-    assert call[3] == mavutil.mavlink.MAV_CMD_GUIDED_CHANGE_SPEED
-    assert call[6] == mavutil.mavlink.SPEED_TYPE_AIRSPEED
-    assert call[7] == 25.0
-
-
-def test_plane_altitude_uses_guided_altitude_slew_command() -> None:
-    module = load_tracking_module()
-    connection = FakeConnection()
-
-    module.send_plane_altitude(connection, 1, 1, 60.0, 10.0)
-
-    call = connection.mav.command_int_calls[-1]
-    assert call[3] == mavutil.mavlink.MAV_CMD_GUIDED_CHANGE_ALTITUDE
-    assert call[8] == 10.0
-    assert call[12] == 60.0
+    assert message is heartbeat
+    assert timestamp_s == 123.0
 
 
-def test_plane_target_altitude_uses_lookahead_and_floor() -> None:
+def test_fixed_wing_guided_change_helpers_are_removed() -> None:
     module = load_tracking_module()
 
-    assert module.plane_target_altitude(
-        relative_altitude_m=100.0,
-        down_mps=10.0,
-        lookahead_s=5.0,
-        min_relative_alt_m=15.0,
-    ) == 50.0
-    assert module.plane_target_altitude(
-        relative_altitude_m=40.0,
-        down_mps=10.0,
-        lookahead_s=5.0,
-        min_relative_alt_m=15.0,
-    ) == 15.0
+    assert not hasattr(module, "send_plane_speed")
+    assert not hasattr(module, "send_plane_altitude")
+    assert not hasattr(module, "send_plane_altitude_offset")
+    assert not hasattr(module, "send_plane_heading")
+    assert not hasattr(module, "send_plane_attitude")
+    assert not hasattr(module, "plane_target_altitude")
 
 
-def test_plane_altitude_offset_uses_local_offset_ned() -> None:
+def test_tracking_timeout_defaults_to_run_until_stopped(monkeypatch) -> None:
     module = load_tracking_module()
-    connection = FakeConnection()
+    monkeypatch.setattr(sys, "argv", ["sitl_track_target.py", "--enable-guidance"])
 
-    module.send_plane_altitude_offset(connection, 1, 1, 0.5)
+    args = module.parse_args()
 
-    call = connection.mav.local_ned_calls[-1]
-    assert call[3] == mavutil.mavlink.MAV_FRAME_LOCAL_OFFSET_NED
-    assert call[7] == 0.5
-
-
-def test_plane_attitude_uses_partial_roll_and_pitch_mask() -> None:
-    module = load_tracking_module()
-    connection = FakeConnection()
-
-    module.send_plane_attitude(connection, 1, 1, 18.0, -12.0, 0.75)
-
-    call = connection.mav.attitude_target_calls[-1]
-    type_mask = call[3]
-    assert not type_mask & mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_ROLL_RATE_IGNORE
-    assert not type_mask & mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_PITCH_RATE_IGNORE
-    assert type_mask & mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_YAW_RATE_IGNORE
-    assert not type_mask & mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_THROTTLE_IGNORE
-    assert type_mask & mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE
-    assert call[8] == 0.75
+    assert args.timeout_s == 0.0
 
 
 def test_plane_rc_attitude_maps_negative_pitch_to_lower_elevator_pwm() -> None:
@@ -218,25 +200,71 @@ def test_plane_visual_steering_defaults_to_airspeed_governor(monkeypatch) -> Non
     assert args.plane_airspeed_mps == 20.0
     assert args.plane_throttle == 0.55
     assert args.vertical_gain == 52.0
-    assert args.plane_centering_gain == 1.15
-    assert args.plane_near_centering_gain == 2.15
-    assert args.plane_damping_gain == 0.22
-    assert args.plane_near_damping_gain == 0.45
+    assert args.plane_centering_gain == 1.55
+    assert args.plane_near_centering_gain == 2.65
+    assert args.plane_damping_gain == 0.14
+    assert args.plane_near_damping_gain == 0.30
     assert args.plane_error_deadband == 0.015
-    assert args.plane_roll_gain_scale == 1.35
-    assert args.plane_pitch_gain_scale == 1.10
-    assert args.plane_pitch_near_gain_scale == 1.45
-    assert args.plane_far_control_scale == 0.55
+    assert args.plane_lead_s == 0.0
+    assert args.plane_roll_gain_scale == 1.75
+    assert args.plane_pitch_gain_scale == 1.20
+    assert args.plane_pitch_near_gain_scale == 1.60
+    assert args.plane_far_control_scale == 0.72
     assert args.plane_pitch_below_center_boost == 0.25
     assert args.plane_near_control_scale == 1.0
     assert args.plane_near_pitch_down_limit_deg == 40.0
     assert args.plane_near_throttle_reduction == 0.0
     assert args.plane_max_pitch_step_deg == 2.0
-    assert args.plane_max_roll_step_deg == 3.0
+    assert args.plane_max_roll_step_deg == 6.0
     assert args.plane_loss_hold_s == 1.5
     assert args.tracking_mode == "red"
     assert args.read_plane_params is True
     assert args.surface_test is False
+
+
+def test_plane_tuning_file_applies_valid_updates_and_keeps_last_valid(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = load_tracking_module()
+    monkeypatch.setattr(sys, "argv", ["sitl_track_target.py", "--enable-guidance"])
+    args = module.parse_args()
+    tuning = module.plane_tuning_from_args(args)
+    tuning_path = tmp_path / "tracking_tuning.json"
+    tuning_path.write_text(
+        '{"revision":4,"values":{"plane_centering_gain":2.4,"plane_proximity_far_size":0.04}}',
+        encoding="utf-8",
+    )
+
+    state, updated = module.update_tuning_from_file(
+        module.TuningFileState(tuning_path),
+        tuning,
+    )
+
+    assert state.mtime_ns is not None
+    assert updated.revision == 4
+    assert updated.plane_centering_gain == 2.4
+    assert updated.plane_proximity_far_size == 0.04
+
+    tuning_path.write_text("{not-json", encoding="utf-8")
+    _state, still_valid = module.update_tuning_from_file(state, updated)
+
+    assert still_valid == updated
+
+
+def test_rc_override_sysid_high_zero_uses_single_gcs_id() -> None:
+    module = load_tracking_module()
+
+    assert (
+        module.validate_rc_override_acceptance(
+            {"MAV_GCS_SYSID": 255.0, "MAV_GCS_SYSID_HI": 0.0},
+            255,
+        )
+        is None
+    )
+    assert module.validate_rc_override_acceptance({"MAV_GCS_SYSID": 255.0}, 42) == (
+        "rc_override_sysid_mismatch"
+    )
 
 
 def test_plane_visual_steering_accepts_red_tracking_mode(monkeypatch) -> None:
@@ -316,11 +344,15 @@ def test_scheduled_gain_increases_near_target() -> None:
     assert module.scheduled_gain(1.15, 2.15, 1.0) == pytest.approx(2.15)
 
 
-def test_damped_axis_error_opposes_error_rate() -> None:
+def test_damped_axis_error_smooths_toward_new_error() -> None:
     module = load_tracking_module()
 
-    assert module.damped_axis_error(0.30, 0.20, 1.0, 0.10) == pytest.approx(0.29)
-    assert module.damped_axis_error(0.20, 0.30, 1.0, 0.10) == pytest.approx(0.21)
+    assert module.damped_axis_error(0.30, 0.20, 1.0, 0.10) == pytest.approx(
+        0.2909090909
+    )
+    assert module.damped_axis_error(0.20, 0.30, 1.0, 0.10) == pytest.approx(
+        0.2090909091
+    )
 
 
 def test_read_plane_parameters_requests_named_params() -> None:
@@ -398,6 +430,54 @@ def test_plane_response_model_uses_aircraft_limits_and_time_constant(monkeypatch
     assert model.pitch_channel == 2
     assert model.throttle_channel == 1
     assert model.yaw_channel == 3
+
+
+def test_plane_response_model_keeps_explicit_fixed_throttle(monkeypatch) -> None:
+    module = load_tracking_module()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "sitl_track_target.py",
+            "--enable-guidance",
+            "--plane-throttle",
+            "0.8",
+            "--plane-min-throttle",
+            "0.8",
+            "--plane-max-throttle",
+            "0.8",
+        ],
+    )
+    args = module.parse_args()
+
+    model = module.plane_response_model_from_params(
+        args,
+        {
+            "TRIM_THROTTLE": 45.0,
+            "THR_MIN": 10.0,
+            "THR_MAX": 90.0,
+        },
+    )
+
+    assert model.cruise_throttle == pytest.approx(0.8)
+    assert model.min_throttle == pytest.approx(0.8)
+    assert model.max_throttle == pytest.approx(0.8)
+
+
+def test_plane_response_model_accepts_live_tuning_without_rate_hz(monkeypatch) -> None:
+    module = load_tracking_module()
+    monkeypatch.setattr(sys, "argv", ["sitl_track_target.py", "--enable-guidance"])
+    args = module.parse_args()
+    tuning = module.plane_tuning_from_args(args)
+
+    model = module.plane_response_model_from_params(
+        tuning,
+        {
+            "PTCH2SRV_TCONST": 0.4,
+        },
+    )
+
+    assert 0.08 <= model.pitch_filter_alpha <= tuning.plane_pitch_filter_alpha
 
 
 def test_plane_rc_attitude_uses_rcmap_channels() -> None:
@@ -579,6 +659,28 @@ def test_plane_pitch_command_limits_near_target_nose_down() -> None:
         max_pitch_deg=40.0,
         near_pitch_down_limit_deg=18.0,
     ) == pytest.approx(-18.0)
+
+
+def test_damped_axis_error_stays_bounded_for_tracking_jitter() -> None:
+    module = load_tracking_module()
+
+    decreasing = module.damped_axis_error(
+        error=-0.4,
+        previous_error=0.4,
+        dt_s=0.001,
+        damping_gain=0.45,
+    )
+    increasing = module.damped_axis_error(
+        error=0.4,
+        previous_error=-0.4,
+        dt_s=0.001,
+        damping_gain=0.45,
+    )
+
+    assert -1.0 <= decreasing <= 1.0
+    assert -1.0 <= increasing <= 1.0
+    assert decreasing == pytest.approx(0.398, abs=0.001)
+    assert increasing == pytest.approx(-0.398, abs=0.001)
 
 
 def test_target_proximity_increases_with_bbox_size() -> None:

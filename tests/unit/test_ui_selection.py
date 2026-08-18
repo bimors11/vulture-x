@@ -159,6 +159,29 @@ def test_runtime_io_keeps_hardware_defaults_for_manual() -> None:
     assert state.rtsp_url == "rtsp://192.168.144.25:8554/main.264"
 
 
+def test_tracking_tuning_write_is_atomic_and_clamped(tmp_path: Path) -> None:
+    module = load_ui_module()
+    module.TRACKING_TUNING_PATH = tmp_path / "tracking_tuning.json"
+
+    payload = module.write_tracking_tuning(
+        {
+            "plane_centering_gain": 9.0,
+            "plane_min_throttle": 0.7,
+            "plane_max_throttle": 0.2,
+            "plane_proximity_far_size": 0.4,
+            "plane_proximity_near_size": 0.1,
+        }
+    )
+
+    assert payload["ok"] is True
+    assert payload["revision"] == 1
+    assert payload["values"]["plane_centering_gain"] == 4.0
+    assert payload["values"]["plane_max_throttle"] == 0.7
+    assert payload["values"]["plane_proximity_near_size"] > 0.4
+    assert module.TRACKING_TUNING_PATH.exists()
+    assert not (tmp_path / "tracking_tuning.json.tmp").exists()
+
+
 def test_app_state_configures_plane_commands(tmp_path: Path, monkeypatch) -> None:
     module = load_ui_module()
     module.LOG_DIR = tmp_path
@@ -190,7 +213,6 @@ def test_app_state_configures_plane_commands(tmp_path: Path, monkeypatch) -> Non
     ]
     assert (
         state.start_steering(
-            duration_s=20,
             forward_mps=20,
             rate_hz=10,
             max_down_mps=10,
@@ -218,6 +240,8 @@ def test_app_state_configures_plane_commands(tmp_path: Path, monkeypatch) -> Non
     )
     assert "--vehicle" in state.steering.command
     assert "plane" in state.steering.command
+    assert state.steering.command[state.steering.command.index("--source-system") + 1] == "255"
+    assert "--timeout-s" not in state.steering.command
     assert state.steering.command[state.steering.command.index("--forward-mps") + 1] == "20.0"
     assert state.steering.command[state.steering.command.index("--max-down-mps") + 1] == "10.0"
     assert state.steering.command[state.steering.command.index("--vertical-gain") + 1] == "52"
@@ -277,7 +301,10 @@ def test_app_state_configures_plane_commands(tmp_path: Path, monkeypatch) -> Non
         state.steering.command[state.steering.command.index("--plane-loss-hold-s") + 1]
         == "1.5"
     )
-    assert "--max-plane-roll-deg" not in state.steering.command
+    assert (
+        state.steering.command[state.steering.command.index("--max-plane-roll-deg") + 1]
+        == "35.0"
+    )
 
 
 def test_app_state_configures_plane_surface_test_command(
@@ -299,7 +326,6 @@ def test_app_state_configures_plane_surface_test_command(
 
     assert (
         state.start_steering(
-            duration_s=30,
             forward_mps=20,
             rate_hz=10,
             max_down_mps=10,
@@ -334,10 +360,12 @@ def test_app_state_configures_plane_surface_test_command(
         state.steering.command[state.steering.command.index("--plane-param-cache-file") + 1]
         == str(module.PLANE_PARAM_CACHE_PATH)
     )
-    assert "--surface-test-throttle" not in state.steering.command
+    assert state.steering.command[state.steering.command.index("--surface-test-throttle") + 1] == (
+        "0.0"
+    )
 
 
-def test_simulator_plane_surface_test_uses_eighty_percent_throttle(
+def test_simulator_plane_ground_test_uses_zero_throttle(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -357,7 +385,6 @@ def test_simulator_plane_surface_test_uses_eighty_percent_throttle(
 
     assert (
         state.start_steering(
-            duration_s=30,
             forward_mps=20,
             rate_hz=10,
             max_down_mps=10,
@@ -385,7 +412,63 @@ def test_simulator_plane_surface_test_uses_eighty_percent_throttle(
     assert "--surface-test-throttle" in state.steering.command
     assert (
         state.steering.command[state.steering.command.index("--surface-test-throttle") + 1]
-        == "0.8"
+        == "0.0"
+    )
+    assert state.steering.command[state.steering.command.index("--plane-throttle") + 1] == "0.8"
+    assert state.steering.command[state.steering.command.index("--plane-min-throttle") + 1] == (
+        "0.8"
+    )
+    assert state.steering.command[state.steering.command.index("--plane-max-throttle") + 1] == (
+        "0.8"
+    )
+
+
+def test_simulator_plane_tracking_uses_eighty_percent_throttle(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = load_ui_module()
+    module.LOG_DIR = tmp_path
+    module.CAMERA_DIR = tmp_path / "camera_frames"
+    module.TRACKING_TUNING_PATH = tmp_path / "tracking_tuning.json"
+    module.CAMERA_DIR.mkdir(parents=True)
+    (module.CAMERA_DIR / "frame-000001.jpg").write_bytes(b"not-a-real-test-image")
+    monkeypatch.setattr(module.ManagedProcess, "start", lambda self: "steering started")
+    state = module.AppState(module.VEHICLE_PROFILES["plane"])
+    state.configure_runtime_io(simulator=True)
+
+    assert (
+        state.start_steering(
+            forward_mps=20,
+            rate_hz=10,
+            max_down_mps=10,
+            vertical_gain=52,
+            plane_centering_gain=1.15,
+            plane_near_centering_gain=2.15,
+            plane_damping_gain=0.22,
+            plane_near_damping_gain=0.45,
+            plane_far_control_scale=0.55,
+            max_plane_pitch_deg=40,
+            plane_pitch_gain_scale=1.10,
+            plane_pitch_near_gain_scale=1.45,
+            plane_pitch_below_center_boost=0.25,
+            plane_pitch_filter_alpha=0.25,
+            plane_max_pitch_step_deg=2.0,
+            plane_max_roll_step_deg=3.0,
+            plane_loss_hold_s=1.5,
+            tracking_mode="banner",
+            mavlink_endpoint="udpin:0.0.0.0:14550",
+        )
+        == "steering started"
+    )
+
+    assert "--surface-test" not in state.steering.command
+    assert state.steering.command[state.steering.command.index("--plane-throttle") + 1] == "0.8"
+    assert state.steering.command[state.steering.command.index("--plane-min-throttle") + 1] == (
+        "0.8"
+    )
+    assert state.steering.command[state.steering.command.index("--plane-max-throttle") + 1] == (
+        "0.8"
     )
 
 
@@ -404,7 +487,6 @@ def test_app_state_surface_test_tracks_red_without_manual_selection(
 
     assert (
         state.start_steering(
-            duration_s=30,
             forward_mps=20,
             rate_hz=15,
             max_down_mps=10,
@@ -456,7 +538,6 @@ def test_app_state_surface_test_tracks_selected_head(
 
     assert (
         state.start_steering(
-            duration_s=30,
             forward_mps=20,
             rate_hz=30,
             max_down_mps=10,
@@ -671,7 +752,6 @@ def test_app_state_configures_quad_commands_without_plane_parameters(
 
     assert (
         state.start_steering(
-            duration_s=20,
             forward_mps=3.0,
             rate_hz=10,
             max_down_mps=3.0,
@@ -695,6 +775,7 @@ def test_app_state_configures_quad_commands_without_plane_parameters(
         == "steering started"
     )
     assert state.steering.command[state.steering.command.index("--vehicle") + 1] == "quad"
+    assert "--timeout-s" not in state.steering.command
     assert state.steering.command[state.steering.command.index("--forward-mps") + 1] == "3.0"
     assert state.steering.command[state.steering.command.index("--vertical-gain") + 1] == "3.5"
     assert "--plane-centering-gain" not in state.steering.command
@@ -714,19 +795,70 @@ def test_plane_takeoff_button_command_is_guarded(tmp_path: Path, monkeypatch) ->
     module.CAMERA_DIR = tmp_path / "camera_frames"
     monkeypatch.setattr(module.ManagedProcess, "start", lambda self: "takeoff started")
     state = module.AppState(module.VEHICLE_PROFILES["plane"])
+    state.configure_runtime_io(simulator=True)
 
-    assert state.start_takeoff("serial:/dev/ttyUSB1:57600") == "takeoff started"
+    assert state.start_takeoff("udpin:0.0.0.0:14550") == "takeoff started"
     assert state.takeoff.command == [
         sys.executable,
         "tools/sitl_arm_takeoff.py",
         "--mavlink",
-        "serial:/dev/ttyUSB1:57600",
+        "udpin:0.0.0.0:14550",
         "--vehicle",
         "plane",
         "--altitude-m",
         "50",
     ]
     assert state.takeoff.env == {"VULTURE_X_ALLOW_SITL_ARM": "1"}
+
+
+class FakeUiMavConnection:
+    def __init__(self) -> None:
+        self.modes: list[int] = []
+        self.closed = False
+        self.mav = self
+
+    def heartbeat_send(self, *args: object) -> None:
+        del args
+
+    def wait_heartbeat(self, timeout: float) -> object:
+        del timeout
+        return object()
+
+    def mode_mapping(self) -> dict[str, int]:
+        return {"AUTO": 10}
+
+    def set_mode(self, mode: int) -> None:
+        self.modes.append(mode)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_stop_steering_returns_sim_plane_to_auto(tmp_path: Path, monkeypatch) -> None:
+    module = load_ui_module()
+    module.LOG_DIR = tmp_path
+    module.CAMERA_DIR = tmp_path / "camera_frames"
+    connection = FakeUiMavConnection()
+    monkeypatch.setattr(module.ManagedProcess, "stop", lambda self: "steering stopped")
+    monkeypatch.setattr(module, "open_mavlink_connection", lambda *_args, **_kwargs: connection)
+    state = module.AppState(module.VEHICLE_PROFILES["plane"])
+    state.configure_runtime_io(simulator=True)
+
+    assert state.stop_steering() == "steering stopped; auto commanded"
+    assert connection.modes == [10]
+    assert connection.closed is True
+
+
+def test_manual_mode_blocks_plane_takeoff(tmp_path: Path) -> None:
+    module = load_ui_module()
+    module.LOG_DIR = tmp_path
+    module.CAMERA_DIR = tmp_path / "camera_frames"
+    state = module.AppState(module.VEHICLE_PROFILES["plane"])
+    state.configure_runtime_io(simulator=False)
+
+    assert state.start_takeoff("serial:/dev/ttyUSB1:57600") == (
+        "takeoff blocked reason=simulator_only"
+    )
 
 
 def test_quad_profile_blocks_plane_takeoff(tmp_path: Path) -> None:

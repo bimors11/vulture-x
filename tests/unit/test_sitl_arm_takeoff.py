@@ -37,3 +37,42 @@ def test_source_system_can_follow_custom_mav_gcs_sysid(monkeypatch) -> None:
     args = module.parse_args()
 
     assert args.source_system == 191
+
+
+class FakeMav:
+    def __init__(self) -> None:
+        self.rc_override_calls: list[tuple[object, ...]] = []
+
+    def rc_channels_override_send(self, *args: object) -> None:
+        self.rc_override_calls.append(args)
+
+
+class FakeConnection:
+    def __init__(self) -> None:
+        self.mav = FakeMav()
+        self.target_system = 1
+        self.target_component = 1
+        self.modes: list[int] = []
+
+    def mode_mapping(self) -> dict[str, int]:
+        return {"FBWA": 5, "AUTO": 10}
+
+    def set_mode(self, mode: int) -> None:
+        self.modes.append(mode)
+
+
+def test_plane_takeoff_switches_to_auto_and_refreshes_throttle(monkeypatch) -> None:
+    module = load_takeoff_module()
+    connection = FakeConnection()
+
+    monkeypatch.setattr(module, "wait_mode", lambda *_args: True)
+    monkeypatch.setattr(module, "arm_vehicle", lambda *_args: True)
+    monkeypatch.setattr(module, "wait_groundspeed", lambda *_args: True)
+    monkeypatch.setattr(module, "wait_relative_altitude", lambda *_args: True)
+
+    result = module.plane_takeoff(connection, altitude_m=50.0, timeout_s=1.0)
+
+    assert result == 0
+    assert connection.modes == [5, 10]
+    assert len(connection.mav.rc_override_calls) == 2
+    assert connection.mav.rc_override_calls[-1][4] == 1800

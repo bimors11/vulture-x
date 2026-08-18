@@ -1,5 +1,10 @@
 You are developing a new repository named `vulture-x`.
 
+Current repository note: the package-level first milestone remains
+simulation-first, while local helper tools now include an ArduPlane fixed-wing
+tracking path that uses `FBWA` plus bounded `RC_CHANNELS_OVERRIDE`. Do not move
+that fixed-wing path back to `GUIDED_CHANGE_*` commands.
+
 The project is a ground-based visual tracking and UAV guidance research system. It must be tested first using ArduPilot SITL before any real hardware integration.
 
 ## System Architecture

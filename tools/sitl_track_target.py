@@ -34,7 +34,17 @@ DEFAULT_MAVLINK = "udpin:0.0.0.0:14550"
 STABLE_FRAME_MIN_AGE_S = 0.02
 PLANE_TARGET_AIRSPEED_MPS = 20.0
 PLANE_CRUISE_THROTTLE = 0.55
+DEFAULT_MAX_FRAME_AGE_MS = 750.0
+DEFAULT_MAVLINK_HEARTBEAT_TIMEOUT_S = 3.0
+DEFAULT_MIN_TRACKING_ALT_M = 15.0
+DEFAULT_PLANE_PROXIMITY_FAR_SIZE = 0.025
+DEFAULT_PLANE_PROXIMITY_NEAR_SIZE = 0.16
+MAX_GUIDED_IMAGE_ERROR = 1.0
+MIN_PLANE_COMMAND_FILTER_ALPHA = 0.18
 PLANE_RESPONSE_PARAM_NAMES = (
+    "ROLL_LIMIT_DEG",
+    "PTCH_LIM_MAX_DEG",
+    "PTCH_LIM_MIN_DEG",
     "LIM_ROLL_CD",
     "LIM_PITCH_MAX",
     "LIM_PITCH_MIN",
@@ -57,6 +67,12 @@ PLANE_RESPONSE_PARAM_NAMES = (
     "RCMAP_PITCH",
     "RCMAP_THROTTLE",
     "RCMAP_YAW",
+    "MAV_GCS_SYSID",
+    "MAV_GCS_SYSID_HI",
+    "MAV_OPTIONS",
+    "RC_OPTIONS",
+    "RC_OVERRIDE_TIME",
+    *(f"RC{channel}_{suffix}" for channel in range(1, 9) for suffix in ("MIN", "TRIM", "MAX")),
     "RC1_REVERSED",
     "RC2_REVERSED",
     "RC3_REVERSED",
@@ -72,6 +88,95 @@ PLANE_RESPONSE_PARAM_NAMES = (
 )
 
 
+class PlaneTrackingTuning(NamedTuple):
+    revision: int
+    vertical_gain: float
+    plane_centering_gain: float
+    plane_near_centering_gain: float
+    plane_roll_gain_scale: float
+    plane_pitch_gain_scale: float
+    plane_pitch_near_gain_scale: float
+    plane_error_deadband: float
+    plane_lead_s: float
+    plane_damping_gain: float
+    plane_near_damping_gain: float
+    plane_pitch_filter_alpha: float
+    plane_max_pitch_step_deg: float
+    plane_max_roll_step_deg: float
+    max_plane_roll_deg: float
+    max_plane_pitch_deg: float
+    plane_near_pitch_down_limit_deg: float
+    plane_far_control_scale: float
+    plane_near_control_scale: float
+    plane_camera_hfov_deg: float
+    plane_proximity_far_size: float
+    plane_proximity_near_size: float
+    plane_airspeed_mps: float
+    plane_throttle: float
+    plane_throttle_airspeed_gain: float
+    plane_min_throttle: float
+    plane_max_throttle: float
+    plane_near_throttle_reduction: float
+    plane_pitch_below_center_boost: float
+    plane_loss_hold_s: float
+    min_tracking_alt_m: float
+    airspeed_low_persistence_s: float
+
+
+TUNING_RANGES: dict[str, tuple[float, float]] = {
+    "vertical_gain": (0.0, 80.0),
+    "plane_centering_gain": (0.0, 4.0),
+    "plane_near_centering_gain": (0.0, 4.0),
+    "plane_roll_gain_scale": (0.0, 3.0),
+    "plane_pitch_gain_scale": (0.0, 3.0),
+    "plane_pitch_near_gain_scale": (0.0, 5.0),
+    "plane_error_deadband": (0.0, 0.2),
+    "plane_lead_s": (0.0, 1.0),
+    "plane_damping_gain": (0.0, 3.0),
+    "plane_near_damping_gain": (0.0, 3.0),
+    "plane_pitch_filter_alpha": (0.05, 0.8),
+    "plane_max_pitch_step_deg": (1.0, 8.0),
+    "plane_max_roll_step_deg": (1.0, 10.0),
+    "max_plane_roll_deg": (1.0, 45.0),
+    "max_plane_pitch_deg": (1.0, 45.0),
+    "plane_near_pitch_down_limit_deg": (0.0, 45.0),
+    "plane_far_control_scale": (0.1, 1.0),
+    "plane_near_control_scale": (0.1, 1.0),
+    "plane_camera_hfov_deg": (20.0, 140.0),
+    "plane_proximity_far_size": (0.001, 0.5),
+    "plane_proximity_near_size": (0.002, 0.8),
+    "plane_airspeed_mps": (5.0, 40.0),
+    "plane_throttle": (0.0, 1.0),
+    "plane_throttle_airspeed_gain": (0.0, 0.2),
+    "plane_min_throttle": (0.0, 1.0),
+    "plane_max_throttle": (0.0, 1.0),
+    "plane_near_throttle_reduction": (0.0, 0.5),
+    "plane_pitch_below_center_boost": (0.0, 3.0),
+    "plane_loss_hold_s": (0.0, 5.0),
+    "min_tracking_alt_m": (0.0, 200.0),
+    "airspeed_low_persistence_s": (0.2, 10.0),
+}
+
+
+class TuningFileState(NamedTuple):
+    path: Path | None
+    mtime_ns: int | None = None
+
+
+class RcCalibration(NamedTuple):
+    minimum: int = 1000
+    trim: int = 1500
+    maximum: int = 2000
+    reversed: bool = False
+
+
+class RcCalibrationSet(NamedTuple):
+    roll: RcCalibration = RcCalibration()
+    pitch: RcCalibration = RcCalibration()
+    throttle: RcCalibration = RcCalibration()
+    yaw: RcCalibration = RcCalibration()
+
+
 class PlaneResponseModel(NamedTuple):
     max_roll_deg: float
     max_pitch_up_deg: float
@@ -82,11 +187,15 @@ class PlaneResponseModel(NamedTuple):
     target_airspeed_mps: float
     pitch_filter_alpha: float
     max_pitch_step_deg: float
+    roll_rc_reversed: bool
     pitch_rc_reversed: bool
     roll_channel: int
     pitch_channel: int
     throttle_channel: int
     yaw_channel: int
+    rc_calibration: RcCalibrationSet
+    min_airspeed_mps: float | None
+    rc_override_timeout_s: float | None
     raw_params: dict[str, float]
 
 
@@ -101,7 +210,12 @@ def parse_args() -> argparse.Namespace:
         "--pipeline",
         default=os.environ.get("VULTURE_X_CAMERA_PIPELINE"),
     )
-    parser.add_argument("--timeout-s", type=float, default=20.0)
+    parser.add_argument(
+        "--timeout-s",
+        type=float,
+        default=0.0,
+        help="Stop after this many seconds. Use 0 or less to run until stopped.",
+    )
     parser.add_argument("--min-area", type=float, default=25.0)
     parser.add_argument("--rate-hz", type=float, default=30.0)
     parser.add_argument(
@@ -122,25 +236,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--plane-centering-gain",
         type=float,
-        default=1.15,
+        default=1.55,
         help="Extra fixed-wing roll/pitch gain for keeping the target on the crosshair.",
     )
     parser.add_argument(
         "--plane-near-centering-gain",
         type=float,
-        default=2.15,
+        default=2.65,
         help="Extra fixed-wing centering gain as bbox proximity approaches near-target.",
     )
     parser.add_argument(
         "--plane-damping-gain",
         type=float,
-        default=0.22,
+        default=0.14,
         help="Fixed-wing damping gain against image-error rate while target is far.",
     )
     parser.add_argument(
         "--plane-near-damping-gain",
         type=float,
-        default=0.45,
+        default=0.30,
         help="Fixed-wing damping gain against image-error rate near target.",
     )
     parser.add_argument(
@@ -170,25 +284,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--plane-roll-gain-scale",
         type=float,
-        default=1.35,
+        default=1.75,
         help="Internal fixed-wing roll gain multiplier for camera frame centering.",
     )
     parser.add_argument(
         "--plane-pitch-gain-scale",
         type=float,
-        default=1.10,
+        default=1.20,
         help="Fixed-wing pitch gain multiplier when the target appears far away.",
     )
     parser.add_argument(
         "--plane-pitch-near-gain-scale",
         type=float,
-        default=1.45,
+        default=1.60,
         help="Fixed-wing pitch gain multiplier when bbox size indicates a near target.",
     )
     parser.add_argument(
         "--plane-far-control-scale",
         type=float,
-        default=0.55,
+        default=0.72,
         help="Minimum fixed-wing roll/pitch control scale while target appears far away.",
     )
     parser.add_argument(
@@ -212,7 +326,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--plane-pitch-filter-alpha",
         type=float,
-        default=0.25,
+        default=0.45,
         help="Low-pass filter alpha for fixed-wing pitch commands.",
     )
     parser.add_argument(
@@ -224,7 +338,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--plane-max-roll-step-deg",
         type=float,
-        default=3.0,
+        default=6.0,
         help="Maximum fixed-wing roll command change per camera update.",
     )
     parser.add_argument(
@@ -255,6 +369,28 @@ def parse_args() -> argparse.Namespace:
         "--demand-state-file",
         type=Path,
         help="Optional JSON file updated every command cycle for UI demand overlays.",
+    )
+    parser.add_argument(
+        "--tuning-file",
+        type=Path,
+        help="Optional JSON file for live fixed-wing tuning updates.",
+    )
+    parser.add_argument(
+        "--max-frame-age-ms",
+        type=float,
+        default=DEFAULT_MAX_FRAME_AGE_MS,
+        help="Maximum accepted camera-frame age before fixed-wing steering releases RC override.",
+    )
+    parser.add_argument(
+        "--mavlink-heartbeat-timeout-s",
+        type=float,
+        default=DEFAULT_MAVLINK_HEARTBEAT_TIMEOUT_S,
+        help="Maximum heartbeat age before fixed-wing steering releases RC override.",
+    )
+    parser.add_argument(
+        "--simulator-mode",
+        action="store_true",
+        help="Allow SITL-only startup conveniences such as switching ArduPlane to FBWA.",
     )
     parser.add_argument(
         "--plane-camera-hfov-deg",
@@ -299,6 +435,30 @@ def parse_args() -> argparse.Namespace:
         help="Throttle fraction reduction as bbox proximity approaches near-target.",
     )
     parser.add_argument(
+        "--plane-proximity-far-size",
+        type=float,
+        default=DEFAULT_PLANE_PROXIMITY_FAR_SIZE,
+        help="Apparent bbox-size threshold treated as far target.",
+    )
+    parser.add_argument(
+        "--plane-proximity-near-size",
+        type=float,
+        default=DEFAULT_PLANE_PROXIMITY_NEAR_SIZE,
+        help="Apparent bbox-size threshold treated as near target.",
+    )
+    parser.add_argument(
+        "--min-tracking-alt-m",
+        type=float,
+        default=DEFAULT_MIN_TRACKING_ALT_M,
+        help="Minimum relative altitude gate for fixed-wing active tracking.",
+    )
+    parser.add_argument(
+        "--airspeed-low-persistence-s",
+        type=float,
+        default=2.0,
+        help="Duration below aircraft minimum airspeed before releasing fixed-wing steering.",
+    )
+    parser.add_argument(
         "--read-plane-params",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -318,7 +478,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--plane-lead-s",
         type=float,
-        default=0.05,
+        default=0.0,
         help="Fixed-wing image-error lead time to reduce visual tracking undershoot.",
     )
     parser.add_argument(
@@ -369,6 +529,111 @@ def parse_args() -> argparse.Namespace:
 
 def clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
+
+
+def plane_tuning_from_args(args: argparse.Namespace) -> PlaneTrackingTuning:
+    return clamp_plane_tuning(
+        PlaneTrackingTuning(
+            revision=0,
+            vertical_gain=float(args.vertical_gain),
+            plane_centering_gain=float(args.plane_centering_gain),
+            plane_near_centering_gain=float(args.plane_near_centering_gain),
+            plane_roll_gain_scale=float(args.plane_roll_gain_scale),
+            plane_pitch_gain_scale=float(args.plane_pitch_gain_scale),
+            plane_pitch_near_gain_scale=float(args.plane_pitch_near_gain_scale),
+            plane_error_deadband=float(args.plane_error_deadband),
+            plane_lead_s=float(args.plane_lead_s),
+            plane_damping_gain=float(args.plane_damping_gain),
+            plane_near_damping_gain=float(args.plane_near_damping_gain),
+            plane_pitch_filter_alpha=float(args.plane_pitch_filter_alpha),
+            plane_max_pitch_step_deg=float(args.plane_max_pitch_step_deg),
+            plane_max_roll_step_deg=float(args.plane_max_roll_step_deg),
+            max_plane_roll_deg=float(args.max_plane_roll_deg),
+            max_plane_pitch_deg=float(args.max_plane_pitch_deg),
+            plane_near_pitch_down_limit_deg=float(args.plane_near_pitch_down_limit_deg),
+            plane_far_control_scale=float(args.plane_far_control_scale),
+            plane_near_control_scale=float(args.plane_near_control_scale),
+            plane_camera_hfov_deg=float(args.plane_camera_hfov_deg),
+            plane_proximity_far_size=float(args.plane_proximity_far_size),
+            plane_proximity_near_size=float(args.plane_proximity_near_size),
+            plane_airspeed_mps=float(args.plane_airspeed_mps),
+            plane_throttle=float(args.plane_throttle),
+            plane_throttle_airspeed_gain=float(args.plane_throttle_airspeed_gain),
+            plane_min_throttle=float(args.plane_min_throttle),
+            plane_max_throttle=float(args.plane_max_throttle),
+            plane_near_throttle_reduction=float(args.plane_near_throttle_reduction),
+            plane_pitch_below_center_boost=float(args.plane_pitch_below_center_boost),
+            plane_loss_hold_s=float(args.plane_loss_hold_s),
+            min_tracking_alt_m=float(args.min_tracking_alt_m),
+            airspeed_low_persistence_s=float(args.airspeed_low_persistence_s),
+        )
+    )
+
+
+def clamp_plane_tuning(tuning: PlaneTrackingTuning) -> PlaneTrackingTuning:
+    values = tuning._asdict()
+    for key, bounds in TUNING_RANGES.items():
+        values[key] = clamp(float(values[key]), bounds[0], bounds[1])
+    if values["plane_proximity_near_size"] <= values["plane_proximity_far_size"]:
+        values["plane_proximity_near_size"] = min(
+            TUNING_RANGES["plane_proximity_near_size"][1],
+            values["plane_proximity_far_size"] + 0.001,
+        )
+    if values["plane_max_throttle"] < values["plane_min_throttle"]:
+        values["plane_max_throttle"] = values["plane_min_throttle"]
+    values["revision"] = int(values["revision"])
+    return PlaneTrackingTuning(**values)
+
+
+def update_tuning_from_file(
+    state: TuningFileState,
+    current: PlaneTrackingTuning,
+) -> tuple[TuningFileState, PlaneTrackingTuning]:
+    if state.path is None:
+        return state, current
+    try:
+        stat = state.path.stat()
+    except FileNotFoundError:
+        return TuningFileState(state.path, None), current
+    except OSError as exc:
+        print(
+            f"tracking_tuning_status=ignored reason=stat_failed detail={type(exc).__name__}",
+            flush=True,
+        )
+        return state, current
+    if stat.st_mtime_ns == state.mtime_ns:
+        return state, current
+    try:
+        payload = json.loads(state.path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        print("tracking_tuning_status=ignored reason=invalid_json", flush=True)
+        return TuningFileState(state.path, stat.st_mtime_ns), current
+    except OSError as exc:
+        print(
+            f"tracking_tuning_status=ignored reason=read_failed detail={type(exc).__name__}",
+            flush=True,
+        )
+        return state, current
+    if not isinstance(payload, dict):
+        print("tracking_tuning_status=ignored reason=invalid_payload", flush=True)
+        return TuningFileState(state.path, stat.st_mtime_ns), current
+    raw_values = payload.get("values", payload)
+    if not isinstance(raw_values, dict):
+        print("tracking_tuning_status=ignored reason=invalid_values", flush=True)
+        return TuningFileState(state.path, stat.st_mtime_ns), current
+    updates: dict[str, float] = {}
+    for key in TUNING_RANGES:
+        if key not in raw_values:
+            continue
+        try:
+            updates[key] = float(raw_values[key])
+        except (TypeError, ValueError):
+            print(f"tracking_tuning_status=ignored reason=invalid_value field={key}", flush=True)
+            return TuningFileState(state.path, stat.st_mtime_ns), current
+    revision = int(payload.get("revision", current.revision + 1))
+    next_tuning = clamp_plane_tuning(current._replace(revision=revision, **updates))
+    print(f"tracking_tuning_status=applied revision={next_tuning.revision}", flush=True)
+    return TuningFileState(state.path, stat.st_mtime_ns), next_tuning
 
 
 def perspective_correct_error(
@@ -714,7 +979,7 @@ def verify_connection(
     connection: mavutil.mavfile,
     args: argparse.Namespace,
 ) -> tuple[int, int, str]:
-    timeout_s = float(args.timeout_s)
+    timeout_s = float(args.timeout_s) if args.timeout_s > 0 else 20.0
     send_client_heartbeat(connection)
     heartbeat = connection.wait_heartbeat(timeout=timeout_s)
     if heartbeat is None:
@@ -737,6 +1002,8 @@ def verify_connection(
     armed = bool(heartbeat.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
     if vehicle == "plane":
         if mode != "FBWA":
+            if not args.simulator_mode:
+                raise RuntimeError("plane_requires_fbwa")
             fbwa_mode = connection.mode_mapping().get("FBWA")
             if fbwa_mode is None:
                 raise RuntimeError("fbwa_mode_unavailable")
@@ -763,6 +1030,71 @@ def send_client_heartbeat(connection: mavutil.mavfile) -> None:
         0,
         0,
     )
+
+
+def heartbeat_status(message: object) -> tuple[bool, str]:
+    armed = bool(message.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+    return armed, mavutil.mode_string_v10(message)
+
+
+def poll_heartbeat(
+    connection: mavutil.mavfile,
+    last_timestamp_s: float,
+) -> tuple[object | None, float]:
+    try:
+        message = connection.recv_match(type="HEARTBEAT", blocking=False, timeout=0)
+    except (TypeError, OSError) as exc:
+        print(f"sitl_tracking_status=heartbeat_skipped reason={type(exc).__name__}", flush=True)
+        return None, last_timestamp_s
+    if message is not None:
+        return message, float(getattr(message, "_timestamp", time.time()))
+    cached_messages = getattr(connection, "messages", {})
+    cached = cached_messages.get("HEARTBEAT") if hasattr(cached_messages, "get") else None
+    if cached is None:
+        return None, last_timestamp_s
+    cached_timestamp_s = float(getattr(cached, "_timestamp", 0.0) or 0.0)
+    if cached_timestamp_s > last_timestamp_s:
+        return cached, cached_timestamp_s
+    return None, last_timestamp_s
+
+
+def tracking_failsafe(reason: str, **fields: object) -> int:
+    suffix = " ".join(f"{key}={value}" for key, value in fields.items())
+    print(f"tracking_failsafe=active reason={reason}{(' ' + suffix) if suffix else ''}", flush=True)
+    return 1
+
+
+def safe_release_override(connection: mavutil.mavfile, active: bool, reason: str) -> bool:
+    if not active:
+        return False
+    try:
+        release_rc_override(connection)
+    except (OSError, RuntimeError) as exc:
+        print(
+            f"tracking_failsafe=release_failed reason={reason} detail={type(exc).__name__}",
+            flush=True,
+        )
+    else:
+        print(f"tracking_control=released reason={reason}", flush=True)
+    return False
+
+
+def validate_rc_override_acceptance(
+    values: dict[str, float],
+    source_system: int,
+) -> str | None:
+    gcs_low = values.get("MAV_GCS_SYSID")
+    gcs_high = values.get("MAV_GCS_SYSID_HI")
+    if gcs_low is not None and gcs_high is not None:
+        low = round(gcs_low)
+        high = round(gcs_high)
+        if high >= low and not (low <= source_system <= high):
+            return "rc_override_sysid_mismatch"
+        if high < low and low not in {0, source_system}:
+            return "rc_override_sysid_mismatch"
+    elif gcs_low is not None and round(gcs_low) not in {0, source_system}:
+        return "rc_override_sysid_mismatch"
+    return None
 
 
 def send_body_velocity(
@@ -804,132 +1136,6 @@ def send_body_velocity(
     )
 
 
-def send_plane_speed(
-    connection: mavutil.mavfile,
-    target_system: int,
-    target_component: int,
-    airspeed_mps: float,
-) -> None:
-    connection.mav.command_int_send(
-        target_system,
-        target_component,
-        mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
-        mavutil.mavlink.MAV_CMD_GUIDED_CHANGE_SPEED,
-        0,
-        0,
-        mavutil.mavlink.SPEED_TYPE_AIRSPEED,
-        airspeed_mps,
-        0,
-        0,
-        0,
-        0,
-        0,
-    )
-
-
-def send_plane_altitude(
-    connection: mavutil.mavfile,
-    target_system: int,
-    target_component: int,
-    relative_altitude_m: float,
-    vertical_speed_mps: float,
-) -> None:
-    connection.mav.command_int_send(
-        target_system,
-        target_component,
-        mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
-        mavutil.mavlink.MAV_CMD_GUIDED_CHANGE_ALTITUDE,
-        0,
-        0,
-        0,
-        0,
-        abs(vertical_speed_mps),
-        0,
-        0,
-        0,
-        relative_altitude_m,
-    )
-
-
-def send_plane_altitude_offset(
-    connection: mavutil.mavfile,
-    target_system: int,
-    target_component: int,
-    down_m: float,
-) -> None:
-    type_mask = (
-        mavutil.mavlink.POSITION_TARGET_TYPEMASK_VX_IGNORE
-        | mavutil.mavlink.POSITION_TARGET_TYPEMASK_VY_IGNORE
-        | mavutil.mavlink.POSITION_TARGET_TYPEMASK_VZ_IGNORE
-        | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AX_IGNORE
-        | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AY_IGNORE
-        | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AZ_IGNORE
-        | mavutil.mavlink.POSITION_TARGET_TYPEMASK_FORCE_SET
-        | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_IGNORE
-        | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
-    )
-    connection.mav.set_position_target_local_ned_send(
-        int(time.monotonic() * 1000) & 0xFFFFFFFF,
-        target_system,
-        target_component,
-        mavutil.mavlink.MAV_FRAME_LOCAL_OFFSET_NED,
-        type_mask,
-        0,
-        0,
-        down_m,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    )
-
-
-def euler_to_quaternion(roll_rad: float, pitch_rad: float, yaw_rad: float) -> list[float]:
-    cy = math.cos(yaw_rad * 0.5)
-    sy = math.sin(yaw_rad * 0.5)
-    cp = math.cos(pitch_rad * 0.5)
-    sp = math.sin(pitch_rad * 0.5)
-    cr = math.cos(roll_rad * 0.5)
-    sr = math.sin(roll_rad * 0.5)
-    return [
-        cr * cp * cy + sr * sp * sy,
-        sr * cp * cy - cr * sp * sy,
-        cr * sp * cy + sr * cp * sy,
-        cr * cp * sy - sr * sp * cy,
-    ]
-
-
-def send_plane_attitude(
-    connection: mavutil.mavfile,
-    target_system: int,
-    target_component: int,
-    roll_deg: float,
-    pitch_deg: float,
-    throttle: float,
-) -> None:
-    # ArduPlane inverts this mask internally. Leaving roll-rate, pitch-rate,
-    # and throttle bits clear marks them as the partial fields to use.
-    type_mask = (
-        mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_YAW_RATE_IGNORE
-        | mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE
-    )
-    connection.mav.set_attitude_target_send(
-        int(time.monotonic() * 1000) & 0xFFFFFFFF,
-        target_system,
-        target_component,
-        type_mask,
-        euler_to_quaternion(math.radians(roll_deg), math.radians(pitch_deg), 0.0),
-        0.0,
-        0.0,
-        0.0,
-        clamp(throttle, 0.0, 1.0),
-    )
-
-
 def rc_override(connection: mavutil.mavfile, channels: dict[int, int]) -> None:
     values = [0] * 8
     for channel, pwm in channels.items():
@@ -951,17 +1157,37 @@ def attitude_to_plane_rc_pwm(
     throttle: float,
     *,
     pitch_rc_reversed: bool = False,
+    roll_rc_reversed: bool = False,
+    calibration: RcCalibrationSet | None = None,
 ) -> tuple[int, int, int, int]:
     roll_fraction = clamp(roll_deg / max(0.1, max_roll_deg), -1.0, 1.0)
     pitch_fraction = clamp(pitch_deg / max(0.1, max_pitch_deg), -1.0, 1.0)
+    if roll_rc_reversed:
+        roll_fraction = -roll_fraction
     if pitch_rc_reversed:
         pitch_fraction = -pitch_fraction
     throttle_fraction = clamp(throttle, 0.0, 1.0)
+    calibration = calibration or RcCalibrationSet()
     return (
-        round(1500 + roll_fraction * 500),
-        round(1500 + pitch_fraction * 500),
-        round(1000 + throttle_fraction * 1000),
-        1500,
+        pwm_from_centered_fraction(roll_fraction, calibration.roll),
+        pwm_from_centered_fraction(pitch_fraction, calibration.pitch),
+        pwm_from_throttle_fraction(throttle_fraction, calibration.throttle),
+        calibration.yaw.trim,
+    )
+
+
+def pwm_from_centered_fraction(value: float, calibration: RcCalibration) -> int:
+    value = clamp(-value if calibration.reversed else value, -1.0, 1.0)
+    if value < 0.0:
+        return round(calibration.trim + value * (calibration.trim - calibration.minimum))
+    return round(calibration.trim + value * (calibration.maximum - calibration.trim))
+
+
+def pwm_from_throttle_fraction(value: float, calibration: RcCalibration) -> int:
+    value = 1.0 - value if calibration.reversed else value
+    return round(
+        calibration.minimum
+        + clamp(value, 0.0, 1.0) * (calibration.maximum - calibration.minimum)
     )
 
 
@@ -1072,10 +1298,19 @@ def damped_axis_error(
     dt_s: float,
     damping_gain: float,
 ) -> float:
+    error = clamp(error, -MAX_GUIDED_IMAGE_ERROR, MAX_GUIDED_IMAGE_ERROR)
     if previous_error is None or dt_s <= 0.0:
         return error
-    error_rate = (error - previous_error) / dt_s
-    return error - error_rate * max(0.0, damping_gain)
+    previous_error = clamp(previous_error, -MAX_GUIDED_IMAGE_ERROR, MAX_GUIDED_IMAGE_ERROR)
+    time_constant_s = max(0.0, damping_gain)
+    if time_constant_s <= 0.0:
+        return error
+    alpha = clamp(dt_s / (time_constant_s + dt_s), 0.0, 1.0)
+    return clamp(
+        previous_error + (error - previous_error) * alpha,
+        -MAX_GUIDED_IMAGE_ERROR,
+        MAX_GUIDED_IMAGE_ERROR,
+    )
 
 
 def adaptive_pitch_gain(
@@ -1159,6 +1394,8 @@ def send_plane_rc_attitude(
     pitch_channel: int = 2,
     throttle_channel: int = 3,
     yaw_channel: int = 4,
+    roll_rc_reversed: bool = False,
+    rc_calibration: RcCalibrationSet | None = None,
 ) -> None:
     roll_pwm, pitch_pwm, throttle_pwm, yaw_pwm = attitude_to_plane_rc_pwm(
         roll_deg,
@@ -1167,6 +1404,8 @@ def send_plane_rc_attitude(
         max_pitch_deg,
         throttle,
         pitch_rc_reversed=pitch_rc_reversed,
+        roll_rc_reversed=roll_rc_reversed,
+        calibration=rc_calibration,
     )
     rc_override(
         connection,
@@ -1187,30 +1426,6 @@ def release_rc_override(connection: mavutil.mavfile) -> None:
         0,
         0,
         0,
-        0,
-        0,
-        0,
-        0,
-    )
-
-
-def send_plane_heading(
-    connection: mavutil.mavfile,
-    target_system: int,
-    target_component: int,
-    heading_deg: float,
-    lateral_accel_mps2: float,
-) -> None:
-    connection.mav.command_int_send(
-        target_system,
-        target_component,
-        mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
-        mavutil.mavlink.MAV_CMD_GUIDED_CHANGE_HEADING,
-        0,
-        0,
-        mavutil.mavlink.HEADING_TYPE_HEADING,
-        heading_deg % 360.0,
-        max(0.05, lateral_accel_mps2),
         0,
         0,
         0,
@@ -1300,31 +1515,42 @@ def save_plane_param_cache(
 
 
 def plane_response_model_from_params(
-    args: argparse.Namespace,
+    args: argparse.Namespace | PlaneTrackingTuning,
     values: dict[str, float],
 ) -> PlaneResponseModel:
+    rate_hz = float(getattr(args, "rate_hz", 30.0))
     max_roll_deg = args.max_plane_roll_deg
-    if "LIM_ROLL_CD" in values and values["LIM_ROLL_CD"] > 0:
+    if "ROLL_LIMIT_DEG" in values and values["ROLL_LIMIT_DEG"] > 0:
+        max_roll_deg = min(max_roll_deg, values["ROLL_LIMIT_DEG"])
+    elif "LIM_ROLL_CD" in values and values["LIM_ROLL_CD"] > 0:
         max_roll_deg = min(max_roll_deg, values["LIM_ROLL_CD"] / 100.0)
 
     max_pitch_up_deg = args.max_plane_pitch_deg
-    if "LIM_PITCH_MAX" in values and values["LIM_PITCH_MAX"] > 0:
+    if "PTCH_LIM_MAX_DEG" in values and values["PTCH_LIM_MAX_DEG"] > 0:
+        max_pitch_up_deg = min(max_pitch_up_deg, values["PTCH_LIM_MAX_DEG"])
+    elif "LIM_PITCH_MAX" in values and values["LIM_PITCH_MAX"] > 0:
         max_pitch_up_deg = min(max_pitch_up_deg, values["LIM_PITCH_MAX"] / 100.0)
 
     max_pitch_down_deg = args.max_plane_pitch_deg
-    if "LIM_PITCH_MIN" in values:
+    if "PTCH_LIM_MIN_DEG" in values:
+        max_pitch_down_deg = min(max_pitch_down_deg, abs(values["PTCH_LIM_MIN_DEG"]))
+    elif "LIM_PITCH_MIN" in values:
         max_pitch_down_deg = min(max_pitch_down_deg, abs(values["LIM_PITCH_MIN"]) / 100.0)
 
     cruise_throttle = args.plane_throttle
-    if "TRIM_THROTTLE" in values:
+    fixed_throttle = (
+        abs(args.plane_throttle - args.plane_min_throttle) < 1e-6
+        and abs(args.plane_throttle - args.plane_max_throttle) < 1e-6
+    )
+    if not fixed_throttle and "TRIM_THROTTLE" in values:
         cruise_throttle = clamp(values["TRIM_THROTTLE"] / 100.0, 0.0, 1.0)
 
     min_throttle = args.plane_min_throttle
-    if "THR_MIN" in values:
+    if not fixed_throttle and "THR_MIN" in values:
         min_throttle = clamp(values["THR_MIN"] / 100.0, 0.0, 1.0)
 
     max_throttle = args.plane_max_throttle
-    if "THR_MAX" in values:
+    if not fixed_throttle and "THR_MAX" in values:
         max_throttle = clamp(values["THR_MAX"] / 100.0, min_throttle, 1.0)
 
     target_airspeed_mps = args.plane_airspeed_mps
@@ -1335,9 +1561,13 @@ def plane_response_model_from_params(
 
     pitch_filter_alpha = args.plane_pitch_filter_alpha
     if "PTCH2SRV_TCONST" in values and values["PTCH2SRV_TCONST"] > 0:
-        period_s = 1.0 / max(1.0, args.rate_hz)
+        period_s = 1.0 / max(1.0, rate_hz)
         response_alpha = period_s / (values["PTCH2SRV_TCONST"] + period_s)
-        pitch_filter_alpha = clamp(response_alpha, 0.08, args.plane_pitch_filter_alpha)
+        pitch_filter_alpha = clamp(
+            response_alpha,
+            MIN_PLANE_COMMAND_FILTER_ALPHA,
+            args.plane_pitch_filter_alpha,
+        )
 
     max_pitch_step_deg = args.plane_max_pitch_step_deg
     if "PTCH2SRV_TCONST" in values and values["PTCH2SRV_TCONST"] > 0:
@@ -1351,10 +1581,40 @@ def plane_response_model_from_params(
     pitch_channel = channel_from_param(values.get("RCMAP_PITCH", 2.0), 2)
     throttle_channel = channel_from_param(values.get("RCMAP_THROTTLE", 3.0), 3)
     yaw_channel = channel_from_param(values.get("RCMAP_YAW", 4.0), 4)
+    roll_rc_reversed = bool(
+        f"RC{roll_channel}_REVERSED" in values
+        and round(values[f"RC{roll_channel}_REVERSED"]) != 0
+    )
     pitch_rc_reversed = bool(
         f"RC{pitch_channel}_REVERSED" in values
         and round(values[f"RC{pitch_channel}_REVERSED"]) != 0
     )
+    rc_calibration = RcCalibrationSet(
+        roll=rc_calibration_from_params(values, roll_channel, roll_rc_reversed),
+        pitch=rc_calibration_from_params(values, pitch_channel, pitch_rc_reversed),
+        throttle=rc_calibration_from_params(
+            values,
+            throttle_channel,
+            bool(
+                f"RC{throttle_channel}_REVERSED" in values
+                and round(values[f"RC{throttle_channel}_REVERSED"]) != 0
+            ),
+        ),
+        yaw=rc_calibration_from_params(
+            values,
+            yaw_channel,
+            bool(
+                f"RC{yaw_channel}_REVERSED" in values
+                and round(values[f"RC{yaw_channel}_REVERSED"]) != 0
+            ),
+        ),
+    )
+    min_airspeed_mps = values.get("ARSPD_FBW_MIN")
+    if min_airspeed_mps is not None and min_airspeed_mps <= 0:
+        min_airspeed_mps = None
+    rc_override_timeout_s = values.get("RC_OVERRIDE_TIME")
+    if rc_override_timeout_s is not None and rc_override_timeout_s < 0:
+        rc_override_timeout_s = None
 
     return PlaneResponseModel(
         max_roll_deg=max(1.0, max_roll_deg),
@@ -1366,11 +1626,15 @@ def plane_response_model_from_params(
         target_airspeed_mps=max(1.0, target_airspeed_mps),
         pitch_filter_alpha=pitch_filter_alpha,
         max_pitch_step_deg=max_pitch_step_deg,
+        roll_rc_reversed=roll_rc_reversed,
         pitch_rc_reversed=pitch_rc_reversed,
         roll_channel=roll_channel,
         pitch_channel=pitch_channel,
         throttle_channel=throttle_channel,
         yaw_channel=yaw_channel,
+        rc_calibration=rc_calibration,
+        min_airspeed_mps=min_airspeed_mps,
+        rc_override_timeout_s=rc_override_timeout_s,
         raw_params=values,
     )
 
@@ -1382,6 +1646,19 @@ def channel_from_param(value: float | None, default: int) -> int:
     if channel < 1 or channel > 8:
         return default
     return channel
+
+
+def rc_calibration_from_params(
+    values: dict[str, float],
+    channel: int,
+    reversed_: bool,
+) -> RcCalibration:
+    minimum = round(values.get(f"RC{channel}_MIN", 1000.0))
+    trim = round(values.get(f"RC{channel}_TRIM", 1500.0))
+    maximum = round(values.get(f"RC{channel}_MAX", 2000.0))
+    if not (800 <= minimum < trim < maximum <= 2200):
+        return RcCalibration(reversed=reversed_)
+    return RcCalibration(minimum, trim, maximum, reversed_)
 
 
 def format_servo_functions(values: dict[str, float]) -> str:
@@ -1421,16 +1698,6 @@ def read_plane_telemetry(
         elif message.get_type() == "GLOBAL_POSITION_INT":
             relative_alt_m = float(message.relative_alt) / 1000.0
     return heading_deg, relative_alt_m, airspeed_mps
-
-
-def plane_target_altitude(
-    relative_altitude_m: float,
-    down_mps: float,
-    lookahead_s: float,
-    min_relative_alt_m: float,
-) -> float:
-    target_altitude_m = relative_altitude_m - down_mps * max(0.1, lookahead_s)
-    return max(min_relative_alt_m, target_altitude_m)
 
 
 def frame_from_source(
@@ -1511,6 +1778,8 @@ def main() -> int:
     if not args.enable_guidance:
         print("sitl_tracking_status=failed reason=missing_--enable-guidance", flush=True)
         return 2
+    plane_tuning = plane_tuning_from_args(args)
+    tuning_file_state = TuningFileState(args.tuning_file)
 
     running = True
 
@@ -1561,12 +1830,22 @@ def main() -> int:
         detector = detect_banner_target if tracking_mode == "banner" else detect_colored_target
         detector_tracker = DetectorBackedTracker(args.tracker, args.min_area, detector)
 
-    deadline = time.monotonic() + args.timeout_s
+    deadline = (
+        time.monotonic() + args.timeout_s
+        if args.timeout_s > 0
+        else float("inf")
+    )
     period_s = 1.0 / args.rate_hz
     frames = 0
     detections = 0
     last_report = 0.0
     last_command = time.monotonic()
+    last_valid_frame_monotonic = time.monotonic()
+    last_heartbeat_monotonic = time.monotonic()
+    last_heartbeat_timestamp_s = time.time()
+    last_gcs_heartbeat_monotonic = time.monotonic()
+    control_authority_active = False
+    low_airspeed_since: float | None = None
     last_detection_time: float | None = None
     plane_heading_deg = 0.0
     plane_relative_alt_m = 50.0
@@ -1577,17 +1856,17 @@ def main() -> int:
     previous_roll_command_deg: float | None = 0.0 if vehicle == "plane" else None
     previous_pitch_command_deg: float | None = 0.0 if vehicle == "plane" else None
     throttle_report = 0.0
-    pitch_gain_report = args.plane_pitch_gain_scale
+    pitch_gain_report = plane_tuning.plane_pitch_gain_scale
     frame_age_s: float | None = None
     proximity_report = 0.0
     control_scale_report = 1.0
-    centering_gain_report = args.plane_centering_gain
-    damping_gain_report = args.plane_damping_gain
+    centering_gain_report = plane_tuning.plane_centering_gain
+    damping_gain_report = plane_tuning.plane_damping_gain
     airspeed_report: float | None = None
     roll_pwm_report = 1500
     pitch_pwm_report = 1500
     throttle_pwm_report = 1000
-    plane_response_model = plane_response_model_from_params(args, {})
+    plane_response_model = plane_response_model_from_params(plane_tuning, {})
     if vehicle == "plane":
         if args.read_plane_params:
             param_values = load_plane_param_cache(args.plane_param_cache_file, args.mavlink)
@@ -1601,7 +1880,13 @@ def main() -> int:
                 )
                 save_plane_param_cache(args.plane_param_cache_file, args.mavlink, param_values)
                 param_source = "mavlink"
-            plane_response_model = plane_response_model_from_params(args, param_values)
+            block_reason = validate_rc_override_acceptance(param_values, args.source_system)
+            if block_reason is not None:
+                print(f"steering blocked reason={block_reason}", flush=True)
+                return 1
+            if "RC_OVERRIDE_TIME" not in param_values:
+                print("tracking_warning=rc_override_timeout_unknown", flush=True)
+            plane_response_model = plane_response_model_from_params(plane_tuning, param_values)
             param_status = "cached" if param_source == "cache" else "read"
             print(
                 f"sitl_tracking_status=plane_params_{param_status} "
@@ -1625,7 +1910,9 @@ def main() -> int:
                 pitch_filter_alpha=max(plane_response_model.pitch_filter_alpha, 0.55),
                 max_pitch_step_deg=max(plane_response_model.max_pitch_step_deg, 6.0),
             )
-            args.plane_max_roll_step_deg = max(args.plane_max_roll_step_deg, 8.0)
+            plane_tuning = plane_tuning._replace(
+                plane_max_roll_step_deg=max(plane_tuning.plane_max_roll_step_deg, 8.0),
+            )
         if not args.surface_test:
             plane_heading_deg, plane_relative_alt_m, plane_airspeed_mps = read_plane_telemetry(
                 connection,
@@ -1634,19 +1921,13 @@ def main() -> int:
                 plane_airspeed_mps,
             )
         if not args.surface_test:
-            send_plane_speed(
-                connection,
-                target_system,
-                target_component,
-                plane_response_model.target_airspeed_mps,
-            )
             throttle_report = plane_throttle_for_airspeed(
                 plane_airspeed_mps,
                 plane_response_model.target_airspeed_mps,
                 plane_response_model.cruise_throttle,
                 plane_response_model.min_throttle,
                 plane_response_model.max_throttle,
-                args.plane_throttle_airspeed_gain,
+                plane_tuning.plane_throttle_airspeed_gain,
                 0.0,
                 max(plane_response_model.max_pitch_up_deg, plane_response_model.max_pitch_down_deg),
             )
@@ -1665,7 +1946,10 @@ def main() -> int:
             plane_response_model.pitch_channel,
             plane_response_model.throttle_channel,
             plane_response_model.yaw_channel,
+            plane_response_model.roll_rc_reversed,
+            plane_response_model.rc_calibration,
         )
+        control_authority_active = True
         roll_pwm_report, pitch_pwm_report, throttle_pwm_report, _yaw_pwm = (
             attitude_to_plane_rc_pwm(
                 0.0,
@@ -1676,22 +1960,92 @@ def main() -> int:
                     plane_response_model.max_pitch_down_deg,
                 ),
                 throttle_report,
+                roll_rc_reversed=plane_response_model.roll_rc_reversed,
                 pitch_rc_reversed=plane_response_model.pitch_rc_reversed,
+                calibration=plane_response_model.rc_calibration,
             )
         )
 
     try:
         while running and time.monotonic() < deadline:
+            now = time.monotonic()
+            if now - last_gcs_heartbeat_monotonic >= 1.0:
+                send_client_heartbeat(connection)
+                last_gcs_heartbeat_monotonic = now
+            heartbeat, last_heartbeat_timestamp_s = poll_heartbeat(
+                connection,
+                last_heartbeat_timestamp_s,
+            )
+            if heartbeat is not None:
+                last_heartbeat_monotonic = now
+                armed, current_mode = heartbeat_status(heartbeat)
+                if vehicle == "plane":
+                    if not armed and not args.surface_test:
+                        control_authority_active = safe_release_override(
+                            connection,
+                            control_authority_active,
+                            "vehicle_disarmed",
+                        )
+                        return tracking_failsafe("vehicle_disarmed")
+                    if current_mode != "FBWA":
+                        control_authority_active = safe_release_override(
+                            connection,
+                            control_authority_active,
+                            "flight_mode_changed",
+                        )
+                        return tracking_failsafe("flight_mode_changed", mode=current_mode)
+            if (
+                vehicle == "plane"
+                and now - last_heartbeat_monotonic
+                > max(0.5, float(args.mavlink_heartbeat_timeout_s))
+            ):
+                control_authority_active = safe_release_override(
+                    connection,
+                    control_authority_active,
+                    "mavlink_heartbeat_timeout",
+                )
+                return tracking_failsafe("mavlink_heartbeat_timeout")
+            if vehicle == "plane":
+                tuning_file_state, plane_tuning = update_tuning_from_file(
+                    tuning_file_state,
+                    plane_tuning,
+                )
+                plane_response_model = plane_response_model_from_params(
+                    plane_tuning,
+                    plane_response_model.raw_params,
+                )
             if frame_reader is not None:
                 ok, frame, frame_age_s = frame_reader.read()
             else:
                 ok, frame = frame_from_source(capture, args.camera_dir)
                 frame_age_s = None
             if not ok or frame is None:
+                if vehicle == "plane":
+                    frame_age_ms = (time.monotonic() - last_valid_frame_monotonic) * 1000.0
+                    if frame_age_ms > max(100.0, float(args.max_frame_age_ms)):
+                        control_authority_active = safe_release_override(
+                            connection,
+                            control_authority_active,
+                            "stale_video",
+                        )
+                        write_demand_state(
+                            args.demand_state_file,
+                            {
+                                "detected": False,
+                                "mode": tracking_mode,
+                                "vehicle": vehicle,
+                                "failsafe": True,
+                                "failsafe_reason": "stale_video",
+                                "frame_age_ms": frame_age_ms,
+                                "tracking_tuning_revision": plane_tuning.revision,
+                            },
+                        )
+                        return tracking_failsafe("stale_video", frame_age_ms=f"{frame_age_ms:.0f}")
                 time.sleep(min(0.05, period_s / 2.0))
                 continue
 
             frames += 1
+            last_valid_frame_monotonic = time.monotonic()
             try:
                 bbox = (
                     custom_tracker.bbox(frame)
@@ -1719,22 +2073,33 @@ def main() -> int:
                         )
                     )
                     airspeed_report = plane_airspeed_mps
-                    if not args.surface_test:
-                        send_plane_speed(
-                            connection,
-                            target_system,
-                            target_component,
-                            plane_response_model.target_airspeed_mps,
-                        )
                     hold_age_s = (
                         float("inf") if last_detection_time is None else now - last_detection_time
                     )
                     hold_attitude = (
                         previous_roll_command_deg is not None
                         and previous_pitch_command_deg is not None
-                        and hold_age_s <= max(0.0, args.plane_loss_hold_s)
+                        and hold_age_s <= max(0.0, plane_tuning.plane_loss_hold_s)
                     )
                     if not hold_attitude:
+                        if last_detection_time is not None:
+                            control_authority_active = safe_release_override(
+                                connection,
+                                control_authority_active,
+                                "target_lost",
+                            )
+                            write_demand_state(
+                                args.demand_state_file,
+                                {
+                                    "detected": False,
+                                    "mode": tracking_mode,
+                                    "vehicle": vehicle,
+                                    "failsafe": True,
+                                    "failsafe_reason": "target_lost",
+                                    "tracking_tuning_revision": plane_tuning.revision,
+                                },
+                            )
+                            return tracking_failsafe("target_lost")
                         previous_roll_command_deg = 0.0
                         previous_pitch_command_deg = 0.0
                         if args.surface_test:
@@ -1746,7 +2111,7 @@ def main() -> int:
                                 plane_response_model.cruise_throttle,
                                 plane_response_model.min_throttle,
                                 plane_response_model.max_throttle,
-                                args.plane_throttle_airspeed_gain,
+                                plane_tuning.plane_throttle_airspeed_gain,
                                 0.0,
                                 max(
                                     plane_response_model.max_pitch_up_deg,
@@ -1768,7 +2133,10 @@ def main() -> int:
                         plane_response_model.pitch_channel,
                         plane_response_model.throttle_channel,
                         plane_response_model.yaw_channel,
+                        plane_response_model.roll_rc_reversed,
+                        plane_response_model.rc_calibration,
                     )
+                    control_authority_active = True
                     (
                         roll_pwm_report,
                         pitch_pwm_report,
@@ -1784,6 +2152,8 @@ def main() -> int:
                         ),
                         throttle_report,
                         pitch_rc_reversed=plane_response_model.pitch_rc_reversed,
+                        roll_rc_reversed=plane_response_model.roll_rc_reversed,
+                        calibration=plane_response_model.rc_calibration,
                     )
                     write_demand_state(
                         args.demand_state_file,
@@ -1807,6 +2177,8 @@ def main() -> int:
                             "frame_age_ms": (
                                 frame_age_s * 1000.0 if frame_age_s is not None else None
                             ),
+                            "tracking_tuning_revision": plane_tuning.revision,
+                            "failsafe": False,
                         },
                     )
                 if now - last_report >= 1.0:
@@ -1820,7 +2192,7 @@ def main() -> int:
                         f"sitl_tracking_status=searching mode={tracking_mode} "
                         "reason=target_not_detected "
                         f"loss_behavior={loss_behavior} "
-                        f"loss_hold_s={args.plane_loss_hold_s:.2f} "
+                        f"loss_hold_s={plane_tuning.plane_loss_hold_s:.2f} "
                         f"frame_age_ms={frame_age_ms:.0f}",
                         flush=True,
                     )
@@ -1832,7 +2204,13 @@ def main() -> int:
             last_detection_time = now
             x, y, width, height = bbox
             frame_height, frame_width = frame.shape[:2]
-            target_proximity = target_proximity_from_bbox(bbox, frame_width, frame_height)
+            target_proximity = target_proximity_from_bbox(
+                bbox,
+                frame_width,
+                frame_height,
+                far_size=plane_tuning.plane_proximity_far_size,
+                near_size=plane_tuning.plane_proximity_near_size,
+            )
             center_x = (x + width / 2) / frame_width
             center_y = (y + height / 2) / frame_height
             error_x = center_x - 0.5
@@ -1842,21 +2220,23 @@ def main() -> int:
                 vertical_fov_deg = math.degrees(
                     2.0
                     * math.atan(
-                        math.tan(math.radians(args.plane_camera_hfov_deg) * 0.5)
+                        math.tan(math.radians(plane_tuning.plane_camera_hfov_deg) * 0.5)
                         / aspect_ratio
                     )
                 )
                 guided_error_x = perspective_correct_error(
                     error_x,
-                    args.plane_camera_hfov_deg,
+                    plane_tuning.plane_camera_hfov_deg,
                 )
                 guided_error_y = perspective_correct_error(error_y, vertical_fov_deg)
             else:
                 guided_error_x = error_x
                 guided_error_y = error_y
             if vehicle == "plane":
-                guided_error_x = apply_deadband(guided_error_x, args.plane_error_deadband)
-                guided_error_y = apply_deadband(guided_error_y, args.plane_error_deadband)
+                guided_error_x = apply_deadband(guided_error_x, plane_tuning.plane_error_deadband)
+                guided_error_y = apply_deadband(guided_error_y, plane_tuning.plane_error_deadband)
+            measured_error_x = guided_error_x
+            measured_error_y = guided_error_y
             proportional_error_x = guided_error_x
             proportional_error_y = guided_error_y
             dt = 0.0
@@ -1867,9 +2247,27 @@ def main() -> int:
                 and previous_error_time is not None
             ):
                 dt = max(0.001, now - previous_error_time)
+                lead_s = max(0.0, plane_tuning.plane_lead_s)
+                if lead_s > 0.0:
+                    proportional_error_x += (
+                        (proportional_error_x - previous_error_x) / dt
+                    ) * lead_s
+                    proportional_error_y += (
+                        (proportional_error_y - previous_error_y) / dt
+                    ) * lead_s
+                    proportional_error_x = clamp(
+                        proportional_error_x,
+                        -MAX_GUIDED_IMAGE_ERROR,
+                        MAX_GUIDED_IMAGE_ERROR,
+                    )
+                    proportional_error_y = clamp(
+                        proportional_error_y,
+                        -MAX_GUIDED_IMAGE_ERROR,
+                        MAX_GUIDED_IMAGE_ERROR,
+                    )
                 damping_gain = scheduled_gain(
-                    args.plane_damping_gain,
-                    args.plane_near_damping_gain,
+                    plane_tuning.plane_damping_gain,
+                    plane_tuning.plane_near_damping_gain,
                     target_proximity,
                 )
                 guided_error_x = damped_axis_error(
@@ -1887,10 +2285,17 @@ def main() -> int:
                 damping_gain_report = damping_gain
             previous_error_x = proportional_error_x
             previous_error_y = proportional_error_y
+            if vehicle == "plane":
+                previous_error_x = measured_error_x
+                previous_error_y = measured_error_y
             previous_error_time = now
 
             right_mps = clamp(error_x * 0.8, -args.max_right_mps, args.max_right_mps)
-            down_mps = clamp(error_y * args.vertical_gain, -args.max_down_mps, args.max_down_mps)
+            down_mps = clamp(
+                error_y * plane_tuning.vertical_gain,
+                -args.max_down_mps,
+                args.max_down_mps,
+            )
             yaw_rate = clamp(
                 error_x * args.max_yaw_rate_deg_s * 2.0,
                 -args.max_yaw_rate_deg_s,
@@ -1922,27 +2327,64 @@ def main() -> int:
                         plane_relative_alt_m,
                         plane_airspeed_mps,
                     )
+                    if plane_relative_alt_m < plane_tuning.min_tracking_alt_m:
+                        control_authority_active = safe_release_override(
+                            connection,
+                            control_authority_active,
+                            "below_tracking_altitude",
+                        )
+                        return tracking_failsafe(
+                            "below_tracking_altitude",
+                            relative_alt_m=f"{plane_relative_alt_m:.1f}",
+                            minimum_m=f"{plane_tuning.min_tracking_alt_m:.1f}",
+                        )
+                    if (
+                        plane_response_model.min_airspeed_mps is not None
+                        and plane_airspeed_mps is not None
+                        and plane_airspeed_mps < plane_response_model.min_airspeed_mps
+                    ):
+                        if low_airspeed_since is None:
+                            low_airspeed_since = now
+                            print(
+                                "tracking_warning=low_airspeed "
+                                f"airspeed_mps={plane_airspeed_mps:.2f} "
+                                f"minimum_mps={plane_response_model.min_airspeed_mps:.2f}",
+                                flush=True,
+                            )
+                        elif now - low_airspeed_since >= plane_tuning.airspeed_low_persistence_s:
+                            control_authority_active = safe_release_override(
+                                connection,
+                                control_authority_active,
+                                "low_airspeed",
+                            )
+                            return tracking_failsafe(
+                                "low_airspeed",
+                                airspeed_mps=f"{plane_airspeed_mps:.2f}",
+                                minimum_mps=f"{plane_response_model.min_airspeed_mps:.2f}",
+                            )
+                    else:
+                        low_airspeed_since = None
                 far_scale = far_target_control_scale(
                     target_proximity,
-                    args.plane_far_control_scale,
+                    plane_tuning.plane_far_control_scale,
                 )
                 near_scale = near_target_control_scale(
                     target_proximity,
-                    args.plane_near_control_scale,
+                    plane_tuning.plane_near_control_scale,
                 )
                 control_scale = far_scale * near_scale
                 control_scale_report = control_scale
                 centering_gain = scheduled_gain(
-                    args.plane_centering_gain,
-                    args.plane_near_centering_gain,
+                    plane_tuning.plane_centering_gain,
+                    plane_tuning.plane_near_centering_gain,
                     target_proximity,
                 )
                 centering_gain_report = centering_gain
                 roll_deg = clamp(
                     guided_error_x
-                    * args.vertical_gain
+                    * plane_tuning.vertical_gain
                     * centering_gain
-                    * args.plane_roll_gain_scale
+                    * plane_tuning.plane_roll_gain_scale
                     * control_scale,
                     -plane_response_model.max_roll_deg,
                     plane_response_model.max_roll_deg,
@@ -1951,7 +2393,7 @@ def main() -> int:
                     previous_roll_command_deg,
                     roll_deg,
                     plane_response_model.pitch_filter_alpha,
-                    args.plane_max_roll_step_deg,
+                    plane_tuning.plane_max_roll_step_deg,
                 )
                 if args.surface_test:
                     roll_deg = enforce_visible_surface_deflection(
@@ -1963,16 +2405,16 @@ def main() -> int:
                 previous_roll_command_deg = roll_deg
                 pitch_deg = plane_pitch_command(
                     guided_error_y,
-                    args.vertical_gain * centering_gain * control_scale,
-                    args.plane_pitch_gain_scale,
-                    args.plane_pitch_near_gain_scale,
+                    plane_tuning.vertical_gain * centering_gain * control_scale,
+                    plane_tuning.plane_pitch_gain_scale,
+                    plane_tuning.plane_pitch_near_gain_scale,
                     target_proximity,
-                    args.plane_pitch_below_center_boost,
+                    plane_tuning.plane_pitch_below_center_boost,
                     max(
                         plane_response_model.max_pitch_up_deg,
                         plane_response_model.max_pitch_down_deg,
                     ),
-                    args.plane_near_pitch_down_limit_deg,
+                    plane_tuning.plane_near_pitch_down_limit_deg,
                 )
                 pitch_deg = clamp_plane_pitch(
                     pitch_deg,
@@ -1998,8 +2440,8 @@ def main() -> int:
                     )
                 previous_pitch_command_deg = pitch_deg
                 pitch_gain_report = adaptive_pitch_gain(
-                    args.plane_pitch_gain_scale,
-                    args.plane_pitch_near_gain_scale,
+                    plane_tuning.plane_pitch_gain_scale,
+                    plane_tuning.plane_pitch_near_gain_scale,
                     target_proximity,
                 )
                 proximity_report = target_proximity
@@ -2012,23 +2454,16 @@ def main() -> int:
                         plane_response_model.cruise_throttle,
                         plane_response_model.min_throttle,
                         plane_response_model.max_throttle,
-                        args.plane_throttle_airspeed_gain,
+                        plane_tuning.plane_throttle_airspeed_gain,
                         pitch_deg,
                         max(
                             plane_response_model.max_pitch_up_deg,
                             plane_response_model.max_pitch_down_deg,
                         ),
                         target_proximity,
-                        args.plane_near_throttle_reduction,
+                        plane_tuning.plane_near_throttle_reduction,
                     )
                 airspeed_report = plane_airspeed_mps
-                if not args.surface_test:
-                    send_plane_speed(
-                        connection,
-                        target_system,
-                        target_component,
-                        plane_response_model.target_airspeed_mps,
-                    )
                 pitch_report = pitch_deg
                 roll_report = roll_deg
                 send_plane_rc_attitude(
@@ -2046,7 +2481,10 @@ def main() -> int:
                     plane_response_model.pitch_channel,
                     plane_response_model.throttle_channel,
                     plane_response_model.yaw_channel,
+                    plane_response_model.roll_rc_reversed,
+                    plane_response_model.rc_calibration,
                 )
+                control_authority_active = True
                 (
                     roll_pwm_report,
                     pitch_pwm_report,
@@ -2061,7 +2499,9 @@ def main() -> int:
                         plane_response_model.max_pitch_down_deg,
                     ),
                     throttle_report,
+                    roll_rc_reversed=plane_response_model.roll_rc_reversed,
                     pitch_rc_reversed=plane_response_model.pitch_rc_reversed,
+                    calibration=plane_response_model.rc_calibration,
                 )
                 write_demand_state(
                     args.demand_state_file,
@@ -2088,6 +2528,15 @@ def main() -> int:
                         "rate_hz": args.rate_hz,
                         "frame_age_ms": frame_age_s * 1000.0 if frame_age_s is not None else None,
                         "target_proximity": target_proximity,
+                        "throttle": throttle_report,
+                        "airspeed_mps": airspeed_report,
+                        "effective_max_roll_deg": plane_response_model.max_roll_deg,
+                        "effective_max_pitch_deg": max(
+                            plane_response_model.max_pitch_up_deg,
+                            plane_response_model.max_pitch_down_deg,
+                        ),
+                        "tracking_tuning_revision": plane_tuning.revision,
+                        "failsafe": False,
                     },
                 )
             last_command = now
@@ -2117,9 +2566,9 @@ def main() -> int:
                     f"centering_gain={centering_gain_report:.2f} "
                     f"damping_gain={damping_gain_report:.2f} "
                     f"pitch_gain={pitch_gain_report:.2f} "
-                    f"pitch_below_boost={args.plane_pitch_below_center_boost:.2f} "
-                    f"near_pitch_down_limit_deg={args.plane_near_pitch_down_limit_deg:.2f} "
-                    f"near_throttle_reduction={args.plane_near_throttle_reduction:.2f} "
+                    f"pitch_below_boost={plane_tuning.plane_pitch_below_center_boost:.2f} "
+                    f"near_pitch_down_limit_deg={plane_tuning.plane_near_pitch_down_limit_deg:.2f} "
+                    f"near_throttle_reduction={plane_tuning.plane_near_throttle_reduction:.2f} "
                     f"pitch_filter_alpha={plane_response_model.pitch_filter_alpha:.2f} "
                     f"pitch_step_deg={plane_response_model.max_pitch_step_deg:.2f} "
                     f"surface_min_deflection_deg={args.surface_test_min_deflection_deg:.2f} "
@@ -2139,7 +2588,11 @@ def main() -> int:
         if vehicle == "quad":
             send_body_velocity(connection, target_system, target_component, 0, 0, 0, 0)
         else:
-            release_rc_override(connection)
+            control_authority_active = safe_release_override(
+                connection,
+                control_authority_active,
+                "shutdown",
+            )
         if capture is not None:
             capture.release()
 

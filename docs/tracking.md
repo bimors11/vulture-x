@@ -68,20 +68,25 @@ instead of floating above it. A small scheduled damping term opposes image-error
 rate without masking the proportional correction, so the controller stays
 assertive when a near banner or custom selection is still off center. If the
 fixed-wing tracker briefly loses the
-target, the SITL helper holds the last roll/pitch/throttle command for the
-bounded `plane_loss_hold_s` window before returning to neutral search. Commands
-are then bounded with read-only
+target, the helper holds the last roll/pitch/throttle command only for the
+bounded `plane_loss_hold_s` window. After that timeout it releases RC override,
+reports `tracking_failsafe=active reason=target_lost`, and stops steering so
+the pilot or ArduPilot owns the aircraft again. Commands are bounded with
+read-only
 ArduPlane response parameters when available. At startup the helper requests
 common roll, pitch, throttle, airspeed, L1, and servo PID/time-constant
-parameters such as `LIM_ROLL_CD`, `LIM_PITCH_MAX`, `LIM_PITCH_MIN`,
-`TRIM_THROTTLE`, `ARSPD_FBW_MIN/MAX`, `RLL2SRV_*`, and `PTCH2SRV_*`. These
-values are used only to adapt command limits and smoothing; the helper does not
-write parameters.
+parameters such as `ROLL_LIMIT_DEG`, `PTCH_LIM_MAX_DEG`,
+`PTCH_LIM_MIN_DEG`, legacy `LIM_*` fallbacks, `TRIM_THROTTLE`,
+`ARSPD_FBW_MIN/MAX`, `RCMAP_*`, `RC*_MIN/TRIM/MAX`, `RLL2SRV_*`, and
+`PTCH2SRV_*`. These values are used only to adapt command limits, calibrated RC
+mapping, and smoothing; the helper does not write parameters.
 
 The browser UI keeps quad and plane steering controls in separate panels. Quad
 mode exposes only body-velocity image-guidance fields. Plane mode exposes the
-fixed-wing crosshair-centering, pitch, and response-model fields, and only the
-plane command path receives those fixed-wing arguments.
+fixed-wing crosshair-centering, pitch, throttle, camera geometry, safety, and
+response-model fields. Plane tuning is applied through
+`logs/ui/tracking_tuning.json`; invalid live tuning updates are ignored and the
+last valid values remain active.
 
 OpenCV's classic tracker API and the local template matcher do not provide a
 calibrated confidence score. The first milestone therefore maps a valid
@@ -92,7 +97,8 @@ Normalized errors use `-1` at the left/top edge, `0` at image center, and `+1`
 at the right/bottom edge.
 
 Machine-readable tracking failure reasons used by the SITL/UI helper path
-include `missing_custom_selection_file`, `custom selection is missing; select a
-target in the UI first`, `OpenCV rejected the custom target selection`, and
-`target_not_detected`. The unresolved safety constraint remains unchanged:
-image size and template lock do not prove physical range or separation.
+include `missing_custom_selection_file`, `target_lost`, `stale_video`,
+`mavlink_heartbeat_timeout`, `vehicle_disarmed`, `flight_mode_changed`,
+`below_tracking_altitude`, and `low_airspeed`. The unresolved safety constraint
+remains unchanged: image size and template lock do not prove physical range or
+separation.
