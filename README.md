@@ -309,10 +309,12 @@ airspeed, the helper releases RC override and stops without changing mode.
 For a fixed-wing ground-only control-surface response check with a SIYI RTSP
 camera and HM30 telemetry, keep the plane disarmed and run the plane UI in
 manual mode. The simplified panel defaults to
-`rtsp://192.168.144.25:8554/main.264` and Mission Planner-style
-`udpcl:192.168.144.12:19856`, so the normal flow is `Connect Video`, drag a
-custom target box, then press `Ground Test (thr 0)`. The equivalent terminal command
-uses pymavlink's `udpout:` spelling:
+`rtsp://192.168.144.25:8554/main.264` and the real aircraft endpoint
+`udpcl:192.168.144.12:19856`. The parser accepts the Mission Planner alias, but
+converts it to the non-binding pymavlink `udpout:` socket so the local process does
+not try to bind the aircraft's remote address as if it were a local interface. The
+normal flow is `Connect Video`, drag a custom target box, then press `Ground Test
+(thr 0)`. The equivalent terminal command is:
 
 ```bash
 python tools/sitl_track_target.py \

@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import socket
 import sys
 import time
 from pathlib import Path
@@ -967,3 +968,20 @@ def test_mavlink_endpoint_parser_accepts_mission_planner_udpcl() -> None:
     parsed = module.parse_mavlink_endpoint("udpcl:192.168.144.12:19856")
 
     assert parsed.device == "udpout:192.168.144.12:19856"
+
+
+def test_open_mavlink_connection_udpcl_connects_remote_udp_peer() -> None:
+    module = load_ui_module()
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as server:
+        server.bind(("127.0.0.1", 0))
+        port = server.getsockname()[1]
+
+        connection = module.open_mavlink_connection(
+            f"udpcl:127.0.0.1:{port}",
+            source_system=255,
+            source_component=0,
+        )
+        try:
+            assert connection.port.getpeername() == ("127.0.0.1", port)
+        finally:
+            connection.close()

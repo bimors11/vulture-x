@@ -35,7 +35,7 @@ STABLE_FRAME_MIN_AGE_S = 0.02
 PLANE_TARGET_AIRSPEED_MPS = 20.0
 PLANE_CRUISE_THROTTLE = 0.55
 DEFAULT_MAX_FRAME_AGE_MS = 750.0
-DEFAULT_MAVLINK_HEARTBEAT_TIMEOUT_S = 3.0
+DEFAULT_MAVLINK_HEARTBEAT_TIMEOUT_S = 0.0
 DEFAULT_MIN_TRACKING_ALT_M = 15.0
 DEFAULT_PLANE_PROXIMITY_FAR_SIZE = 0.025
 DEFAULT_PLANE_PROXIMITY_NEAR_SIZE = 0.16
@@ -214,7 +214,10 @@ def parse_args() -> argparse.Namespace:
         "--timeout-s",
         type=float,
         default=0.0,
-        help="Stop after this many seconds. Use 0 or less to run until stopped.",
+        help=(
+            "Deprecated and ignored. Tracking must stop only on manual stop or "
+            "target-loss safety logic."
+        ),
     )
     parser.add_argument("--min-area", type=float, default=25.0)
     parser.add_argument("--rate-hz", type=float, default=30.0)
@@ -385,7 +388,10 @@ def parse_args() -> argparse.Namespace:
         "--mavlink-heartbeat-timeout-s",
         type=float,
         default=DEFAULT_MAVLINK_HEARTBEAT_TIMEOUT_S,
-        help="Maximum heartbeat age before fixed-wing steering releases RC override.",
+        help=(
+            "Deprecated and ignored. Tracking stops only on manual stop or "
+            "configured target-loss logic."
+        ),
     )
     parser.add_argument(
         "--simulator-mode",
@@ -524,7 +530,10 @@ def parse_args() -> argparse.Namespace:
             "surfaces. Throttle defaults to zero unless --surface-test-throttle is set."
         ),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.timeout_s = 0.0
+    args.mavlink_heartbeat_timeout_s = 0.0
+    return args
 
 
 def clamp(value: float, lower: float, upper: float) -> float:
@@ -1002,8 +1011,6 @@ def verify_connection(
     armed = bool(heartbeat.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
     if vehicle == "plane":
         if mode != "FBWA":
-            if not args.simulator_mode:
-                raise RuntimeError("plane_requires_fbwa")
             fbwa_mode = connection.mode_mapping().get("FBWA")
             if fbwa_mode is None:
                 raise RuntimeError("fbwa_mode_unavailable")
@@ -1035,6 +1042,10 @@ def send_client_heartbeat(connection: mavutil.mavfile) -> None:
 def heartbeat_status(message: object) -> tuple[bool, str]:
     armed = bool(message.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
     return armed, mavutil.mode_string_v10(message)
+
+
+def should_reassert_plane_mode(mode_name: str) -> bool:
+    return mode_name == "RTL"
 
 
 def poll_heartbeat(
@@ -1830,18 +1841,12 @@ def main() -> int:
         detector = detect_banner_target if tracking_mode == "banner" else detect_colored_target
         detector_tracker = DetectorBackedTracker(args.tracker, args.min_area, detector)
 
-    deadline = (
-        time.monotonic() + args.timeout_s
-        if args.timeout_s > 0
-        else float("inf")
-    )
     period_s = 1.0 / args.rate_hz
     frames = 0
     detections = 0
     last_report = 0.0
     last_command = time.monotonic()
     last_valid_frame_monotonic = time.monotonic()
-    last_heartbeat_monotonic = time.monotonic()
     last_heartbeat_timestamp_s = time.time()
     last_gcs_heartbeat_monotonic = time.monotonic()
     control_authority_active = False
@@ -1967,9 +1972,9 @@ def main() -> int:
         )
 
     try:
-        while running and time.monotonic() < deadline:
+        while running:
             now = time.monotonic()
-            if now - last_gcs_heartbeat_monotonic >= 1.0:
+            if now - last_gcs_heartbeat_monotonic >= 0.5:
                 send_client_heartbeat(connection)
                 last_gcs_heartbeat_monotonic = now
             heartbeat, last_heartbeat_timestamp_s = poll_heartbeat(
@@ -1977,7 +1982,6 @@ def main() -> int:
                 last_heartbeat_timestamp_s,
             )
             if heartbeat is not None:
-                last_heartbeat_monotonic = now
                 armed, current_mode = heartbeat_status(heartbeat)
                 if vehicle == "plane":
                     if not armed and not args.surface_test:
@@ -1987,6 +1991,16 @@ def main() -> int:
                             "vehicle_disarmed",
                         )
                         return tracking_failsafe("vehicle_disarmed")
+                    if current_mode == "RTL":
+                        fbwa_mode = connection.mode_mapping().get("FBWA")
+                        if fbwa_mode is not None:
+                            print(
+                                "sitl_tracking_status=reasserting_mode "
+                                f"vehicle=plane from={current_mode} to=FBWA",
+                                flush=True,
+                            )
+                            connection.set_mode(fbwa_mode)
+                            continue
                     if current_mode != "FBWA":
                         control_authority_active = safe_release_override(
                             connection,
@@ -1994,17 +2008,6 @@ def main() -> int:
                             "flight_mode_changed",
                         )
                         return tracking_failsafe("flight_mode_changed", mode=current_mode)
-            if (
-                vehicle == "plane"
-                and now - last_heartbeat_monotonic
-                > max(0.5, float(args.mavlink_heartbeat_timeout_s))
-            ):
-                control_authority_active = safe_release_override(
-                    connection,
-                    control_authority_active,
-                    "mavlink_heartbeat_timeout",
-                )
-                return tracking_failsafe("mavlink_heartbeat_timeout")
             if vehicle == "plane":
                 tuning_file_state, plane_tuning = update_tuning_from_file(
                     tuning_file_state,

@@ -1,3 +1,4 @@
+import builtins
 import importlib.util
 import os
 import sys
@@ -7,6 +8,8 @@ from types import ModuleType
 import cv2
 import numpy as np
 import pytest
+
+MAVLINK = __import__("pymavlink.mavutil", fromlist=["mavlink"]).mavlink
 
 
 def load_tracking_module() -> ModuleType:
@@ -31,6 +34,10 @@ class FakeMav:
         self.attitude_target_calls: list[tuple[object, ...]] = []
         self.rc_override_calls: list[tuple[object, ...]] = []
         self.param_request_read_calls: list[tuple[object, ...]] = []
+        self.heartbeat_send_calls: list[tuple[object, ...]] = []
+
+    def heartbeat_send(self, *args: object) -> None:
+        self.heartbeat_send_calls.append(args)
 
     def command_int_send(self, *args: object) -> None:
         self.command_int_calls.append(args)
@@ -92,6 +99,58 @@ class FakeConnection:
         return self.messages.pop(0) if self.messages else None
 
 
+class FakePlaneConnection(FakeConnection):
+    def __init__(self, *, mode: str, armed: bool) -> None:
+        super().__init__()
+        self._mode = mode
+        self._armed = armed
+        self.mode_set: int | None = None
+        self.heartbeat_mode = mode
+
+    def wait_heartbeat(self, timeout: float) -> object:
+        del timeout
+        return type(
+            "Heartbeat",
+            (),
+            {
+                "mode_name": "MANUAL",
+                "autopilot": MAVLINK.MAV_AUTOPILOT_ARDUPILOTMEGA,
+                "type": MAVLINK.MAV_TYPE_FIXED_WING,
+                "base_mode": (
+                    MAVLINK.MAV_MODE_FLAG_SAFETY_ARMED if self._armed else 0
+                ),
+            },
+        )()
+
+    def mode_mapping(self) -> dict[str, int]:
+        return {"FBWA": 5, "MANUAL": 0}
+
+    def set_mode(self, mode_number: int) -> None:
+        self.mode_set = mode_number
+        self.heartbeat_mode = "FBWA"
+
+    def recv_match(
+        self,
+        *,
+        type: str | list[str],
+        blocking: bool,
+        timeout: float,
+    ) -> object | None:
+        del blocking, timeout
+        if self.heartbeat_mode == "FBWA":
+            return builtins.type(
+                "Heartbeat",
+                (),
+                {
+                    "mode_name": "FBWA",
+                    "autopilot": MAVLINK.MAV_AUTOPILOT_ARDUPILOTMEGA,
+                    "type": MAVLINK.MAV_TYPE_FIXED_WING,
+                    "base_mode": MAVLINK.MAV_MODE_FLAG_SAFETY_ARMED,
+                },
+            )()
+        return None
+
+
 def test_poll_heartbeat_accepts_new_cached_mavlink_heartbeat() -> None:
     module = load_tracking_module()
     heartbeat = FakeHeartbeatMessage(123.0)
@@ -121,6 +180,25 @@ def test_tracking_timeout_defaults_to_run_until_stopped(monkeypatch) -> None:
     args = module.parse_args()
 
     assert args.timeout_s == 0.0
+    assert args.mavlink_heartbeat_timeout_s == 0.0
+
+
+def test_legacy_heartbeat_timeout_flag_is_ignored(monkeypatch) -> None:
+    module = load_tracking_module()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "sitl_track_target.py",
+            "--enable-guidance",
+            "--mavlink-heartbeat-timeout-s",
+            "7.5",
+        ],
+    )
+
+    args = module.parse_args()
+
+    assert args.mavlink_heartbeat_timeout_s == 0.0
 
 
 def test_plane_rc_attitude_maps_negative_pitch_to_lower_elevator_pwm() -> None:
@@ -311,6 +389,63 @@ def test_head_tracking_mode_uses_operator_selection(monkeypatch) -> None:
     args = module.parse_args()
 
     assert args.tracking_mode == "head"
+
+
+def test_should_reassert_plane_mode_for_rtl() -> None:
+    module = load_tracking_module()
+
+    assert module.should_reassert_plane_mode("RTL") is True
+    assert module.should_reassert_plane_mode("FBWA") is False
+
+
+def test_verify_connection_auto_switches_plane_to_fbwa(monkeypatch) -> None:
+    module = load_tracking_module()
+    connection = FakePlaneConnection(mode="MANUAL", armed=True)
+    args = type(
+        "Args",
+        (),
+        {
+            "timeout_s": 2.0,
+            "vehicle": "plane",
+            "simulator_mode": False,
+            "surface_test": False,
+        },
+    )()
+    monkeypatch.setattr(
+        module.mavutil,
+        "mode_string_v10",
+        lambda message: getattr(message, "mode_name", "FBWA"),
+    )
+
+    result = module.verify_connection(connection, args)
+
+    assert result == (1, 1, "plane")
+    assert connection.mode_set == 5
+
+
+def test_surface_test_allows_unarmed_plane_startup(monkeypatch) -> None:
+    module = load_tracking_module()
+    connection = FakePlaneConnection(mode="MANUAL", armed=False)
+    args = type(
+        "Args",
+        (),
+        {
+            "timeout_s": 2.0,
+            "vehicle": "plane",
+            "simulator_mode": False,
+            "surface_test": True,
+        },
+    )()
+    monkeypatch.setattr(
+        module.mavutil,
+        "mode_string_v10",
+        lambda message: getattr(message, "mode_name", "FBWA"),
+    )
+
+    result = module.verify_connection(connection, args)
+
+    assert result == (1, 1, "plane")
+    assert connection.mode_set == 5
 
 
 def test_apply_deadband_zeroes_small_image_error() -> None:
