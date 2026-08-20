@@ -62,6 +62,20 @@ mypy
 vulture-x --config configs/default.yaml --check-config
 ```
 
+Verify the local OpenCV DNN models used by manual/head tracking:
+
+```bash
+python tools/ensure_vision_models.py
+```
+
+The repository carries the small NanoTrack and YuNet ONNX files under
+`models/opencv/` so a second development machine can run the same tracker
+defaults after cloning. If a checkout is missing those files, restore them with:
+
+```bash
+python tools/ensure_vision_models.py --download
+```
+
 The normal bootstrap is safe and has no vehicle command authority:
 
 ```bash
@@ -307,6 +321,13 @@ target. On stale video, heartbeat timeout, disarm, pilot/external mode change
 away from `FBWA`, target loss beyond `plane_loss_hold_s`, unknown or low valid
 altitude, or persistent low valid airspeed, the helper releases RC override and
 stops without changing mode.
+
+Manual box and head/face tracking use OpenCV NanoTrack by default. Head
+candidate acquisition uses OpenCV YuNet and then hands the selected bbox to
+NanoTrack; the legacy template tracker remains available with
+`--tracker-engine template` for A/B debugging. Runtime never downloads models
+implicitly: model paths are explicit CLI arguments and `tools/ensure_vision_models.py`
+verifies the expected local files and SHA-256 hashes.
 
 For a fixed-wing ground-only control-surface response check with a SIYI RTSP
 camera and HM30 telemetry, keep the plane disarmed and run the plane UI in

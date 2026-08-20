@@ -1,6 +1,7 @@
 """OpenCV trackers with a stable Vulture-X result contract."""
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol, cast
 
 import cv2
@@ -9,6 +10,14 @@ import numpy as np
 from vulture_x.models import TrackingResult
 from vulture_x.vision.target_state import tracking_result_from_bbox
 from vulture_x.vision.video_source import BoundingBox, ImageFrame, VideoFrame
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_NANO_BACKBONE = (
+    REPO_ROOT / "models" / "opencv" / "nanotrack" / "nanotrack_backbone_sim.onnx"
+)
+DEFAULT_NANO_NECKHEAD = (
+    REPO_ROOT / "models" / "opencv" / "nanotrack" / "nanotrack_head_sim.onnx"
+)
 
 
 class BboxTracker(Protocol):
@@ -32,6 +41,13 @@ class InitialTargetSelection:
     label: str
     confidence: float | None
     reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class TrackingObservation:
+    detected: bool
+    bbox: tuple[int, int, int, int] | None
+    confidence: float | None
 
 
 def clamp_bbox(
@@ -324,11 +340,14 @@ class TemplateMatchingTracker:
         center_jump = float(
             np.hypot(desired_center_x - previous_center_x, desired_center_y - previous_center_y)
         )
+        bbox_scale = max(1.0, float(max(pw, ph)))
+        allowed_target_jump_px = max(18.0, bbox_scale * 2.5)
         previous_area = max(1.0, float(pw * ph))
         desired_area = max(1.0, float(dw * dh))
         size_ratio = max(previous_area / desired_area, desired_area / previous_area)
         return (
             center_jump / max(1.0, frame_diag) <= self._max_center_jump_norm
+            and center_jump <= allowed_target_jump_px
             and size_ratio <= self._max_size_ratio
         )
 
@@ -436,11 +455,54 @@ class TemplateMatchingTracker:
         )
 
 
+class NanoTracker:
+    """OpenCV NanoTrack wrapper with explicit local ONNX model paths."""
+
+    def __init__(
+        self,
+        backbone_path: Path = DEFAULT_NANO_BACKBONE,
+        neckhead_path: Path = DEFAULT_NANO_NECKHEAD,
+    ) -> None:
+        if not hasattr(cv2, "TrackerNano_create") or not hasattr(cv2, "TrackerNano_Params"):
+            raise RuntimeError("OpenCV TrackerNano is unavailable; install opencv-contrib-python")
+        if not backbone_path.exists():
+            raise FileNotFoundError(f"tracker_nano_backbone_missing path={backbone_path}")
+        if not neckhead_path.exists():
+            raise FileNotFoundError(f"tracker_nano_neckhead_missing path={neckhead_path}")
+        params_factory = cv2.TrackerNano_Params  # type: ignore[attr-defined]
+        create_tracker = cv2.TrackerNano_create
+        params = params_factory()
+        params.backbone = str(backbone_path)
+        params.neckhead = str(neckhead_path)
+        self._tracker: Any = create_tracker(params)
+
+    def init(self, frame: ImageFrame, bbox: tuple[int, int, int, int]) -> bool:
+        return self._tracker.init(frame, bbox) is not False
+
+    def update(self, frame: ImageFrame) -> tuple[bool, tuple[int, int, int, int]]:
+        detected, bbox = self._tracker.update(frame)
+        return bool(detected), tuple(round(value) for value in bbox)
+
+    def confidence(self) -> float | None:
+        score = getattr(self._tracker, "getTrackingScore", None)
+        if score is None:
+            return None
+        return max(0.0, min(1.0, float(score())))
+
+
 class OpenCvTracker:
-    def __init__(self, tracker_name: str) -> None:
-        if tracker_name not in {"CSRT", "KCF", "TEMPLATE"}:
+    def __init__(
+        self,
+        tracker_name: str,
+        *,
+        nano_backbone_path: Path = DEFAULT_NANO_BACKBONE,
+        nano_neckhead_path: Path = DEFAULT_NANO_NECKHEAD,
+    ) -> None:
+        if tracker_name not in {"CSRT", "KCF", "TEMPLATE", "NANO"}:
             raise ValueError(f"unsupported tracker: {tracker_name}")
         self._tracker_name = tracker_name
+        self._nano_backbone_path = nano_backbone_path
+        self._nano_neckhead_path = nano_neckhead_path
         self._tracker: BboxTracker | Any | None = None
         self._initialized = False
 
@@ -490,12 +552,18 @@ class OpenCvTracker:
             x, y, width, height = raw_bbox
             bbox = (float(x), float(y), float(width), float(height))
         height, width = frame.image.shape[:2]
+        confidence = 1.0 if detected else 0.0
+        tracker_confidence = getattr(self._tracker, "confidence", None)
+        if callable(tracker_confidence):
+            value = tracker_confidence()
+            if isinstance(value, (int, float)):
+                confidence = float(value)
         return tracking_result_from_bbox(
             timestamp_monotonic_s=frame.timestamp_monotonic_s,
             frame_width=width,
             frame_height=height,
             bbox=bbox,
-            confidence=1.0 if detected else 0.0,
+            confidence=confidence,
         )
 
     def reset(self) -> None:
@@ -503,6 +571,8 @@ class OpenCvTracker:
         self._initialized = False
 
     def _create_tracker(self) -> Any:
+        if self._tracker_name == "NANO":
+            return NanoTracker(self._nano_backbone_path, self._nano_neckhead_path)
         if self._tracker_name == "TEMPLATE":
             return TemplateMatchingTracker()
         direct_name = f"Tracker{self._tracker_name}_create"

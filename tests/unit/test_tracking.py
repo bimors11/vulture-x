@@ -3,6 +3,9 @@ import pytest
 
 from vulture_x.vision.target_state import tracking_result_from_bbox
 from vulture_x.vision.tracker import (
+    DEFAULT_NANO_BACKBONE,
+    DEFAULT_NANO_NECKHEAD,
+    NanoTracker,
     OpenCvTracker,
     TargetDetection,
     TemplateMatchingTracker,
@@ -63,6 +66,23 @@ def test_template_tracker_follows_selected_patch_motion() -> None:
     assert result.center_x_normalized == pytest.approx((46 + 15) / 160)
     assert result.center_y_normalized == pytest.approx((35 + 10) / 120)
     assert result.confidence == 1.0
+
+
+def test_nanotrack_tracker_reports_real_confidence_when_models_exist() -> None:
+    if not DEFAULT_NANO_BACKBONE.exists() or not DEFAULT_NANO_NECKHEAD.exists():
+        pytest.skip("NanoTrack ONNX models are not installed")
+    first = np.zeros((120, 160, 3), dtype=np.uint8)
+    second = np.zeros_like(first)
+    first[30:50, 40:70] = (20, 200, 255)
+    second[42:62, 54:84] = (20, 200, 255)
+
+    tracker = NanoTracker()
+    assert tracker.init(first, (40, 30, 30, 20))
+    detected, bbox = tracker.update(second)
+
+    assert detected
+    assert bbox[2:] == (30, 20)
+    assert tracker.confidence() is not None
 
 
 def test_template_tracker_rejects_low_match_score() -> None:

@@ -444,6 +444,17 @@ def test_head_tracking_mode_uses_operator_selection(monkeypatch) -> None:
     assert args.tracking_mode == "head"
 
 
+def test_tracker_engine_defaults_to_nanotrack_models(monkeypatch) -> None:
+    module = load_tracking_module()
+    monkeypatch.setattr(sys, "argv", ["sitl_track_target.py", "--enable-guidance"])
+
+    args = module.parse_args()
+
+    assert args.tracker_engine == "nano"
+    assert module.tracker_name_from_args(args).startswith("NANO:")
+    module.validate_tracking_models(args, "custom")
+
+
 def test_reassert_plane_mode_helper_is_removed() -> None:
     module = load_tracking_module()
 

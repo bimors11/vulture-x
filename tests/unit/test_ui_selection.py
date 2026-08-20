@@ -127,7 +127,10 @@ def test_status_payload_uses_requested_display_mode(monkeypatch) -> None:
     module = load_ui_module()
     seen: list[str] = []
 
-    def fake_latest_target(display_mode: str = "red") -> tuple[dict[str, object], None]:
+    def fake_latest_target(
+        display_mode: str = "red",
+        **_kwargs: object,
+    ) -> tuple[dict[str, object], None]:
         seen.append(display_mode)
         return {"detected": False, "mode": display_mode}, None
 
@@ -697,7 +700,7 @@ def test_select_head_at_saves_clicked_head_bbox(
     os.utime(frame_path, (old_mtime, old_mtime))
     monkeypatch.setattr(
         module,
-        "detect_heads",
+        "detect_heads_yunet",
         lambda _frame, **_kwargs: [(10, 20, 30, 80), (100, 15, 40, 90)],
     )
 
@@ -726,7 +729,7 @@ def test_latest_target_draws_head_count_without_selection(
     os.utime(frame_path, (old_mtime, old_mtime))
     monkeypatch.setattr(
         module,
-        "detect_heads",
+        "detect_heads_yunet",
         lambda _frame, **_kwargs: [(10, 20, 30, 80), (100, 15, 40, 90)],
     )
 

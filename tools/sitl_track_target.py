@@ -31,6 +31,16 @@ from vulture_x.vision.tracker import (
 )
 
 DEFAULT_MAVLINK = "udpin:0.0.0.0:14550"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_NANO_BACKBONE = (
+    REPO_ROOT / "models" / "opencv" / "nanotrack" / "nanotrack_backbone_sim.onnx"
+)
+DEFAULT_NANO_NECKHEAD = (
+    REPO_ROOT / "models" / "opencv" / "nanotrack" / "nanotrack_head_sim.onnx"
+)
+DEFAULT_YUNET_MODEL = (
+    REPO_ROOT / "models" / "opencv" / "yunet" / "face_detection_yunet_2023mar.onnx"
+)
 STABLE_FRAME_MIN_AGE_S = 0.02
 PLANE_TARGET_AIRSPEED_MPS = 20.0
 PLANE_CRUISE_THROTTLE = 0.55
@@ -199,6 +209,64 @@ class PlaneResponseModel(NamedTuple):
     min_airspeed_mps: float | None
     rc_override_timeout_s: float | None
     raw_params: dict[str, float]
+
+
+class TrackingObservation(NamedTuple):
+    detected: bool
+    bbox: tuple[int, int, int, int]
+    confidence: float | None
+
+
+class RuntimeMetrics:
+    def __init__(self, window: int = 240) -> None:
+        self._window = window
+        self._samples: dict[str, list[float]] = {}
+        self._last_event_ns: dict[str, int] = {}
+        self._counts: dict[str, int] = {
+            "dropped_frames": 0,
+            "deadline_misses": 0,
+            "tracker_failures": 0,
+        }
+
+    def observe(self, name: str, value: float) -> None:
+        samples = self._samples.setdefault(name, [])
+        samples.append(value)
+        if len(samples) > self._window:
+            del samples[: len(samples) - self._window]
+
+    def mark(self, name: str, now_ns: int) -> None:
+        previous_ns = self._last_event_ns.get(name)
+        self._last_event_ns[name] = now_ns
+        if previous_ns is None or now_ns <= previous_ns:
+            return
+        elapsed_s = (now_ns - previous_ns) / 1_000_000_000.0
+        if elapsed_s > 0.0:
+            self.observe(f"{name}_hz", 1.0 / elapsed_s)
+
+    def increment(self, name: str) -> None:
+        self._counts[name] = self._counts.get(name, 0) + 1
+
+    def summary(self) -> dict[str, object]:
+        payload: dict[str, object] = dict(self._counts)
+        for name, samples in self._samples.items():
+            if not samples:
+                continue
+            ordered = sorted(samples)
+            payload[f"{name}_mean"] = sum(samples) / len(samples)
+            payload[f"{name}_p50"] = percentile(ordered, 0.50)
+            payload[f"{name}_p95"] = percentile(ordered, 0.95)
+            payload[f"{name}_p99"] = percentile(ordered, 0.99)
+            payload[f"{name}_max"] = max(samples)
+            if name.endswith("_hz"):
+                payload[name] = sum(samples) / len(samples)
+        return payload
+
+
+def percentile(ordered_values: list[float], fraction: float) -> float:
+    if not ordered_values:
+        return 0.0
+    index = round((len(ordered_values) - 1) * clamp(fraction, 0.0, 1.0))
+    return ordered_values[index]
 
 
 def parse_args() -> argparse.Namespace:
@@ -517,6 +585,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--selection-file", type=Path, default=None)
     parser.add_argument("--tracker", choices=("CSRT", "KCF", "TEMPLATE"), default="TEMPLATE")
     parser.add_argument(
+        "--tracker-engine",
+        choices=("nano", "template"),
+        default="nano",
+        help="Primary manual/head tracker backend. template keeps the legacy fallback path.",
+    )
+    parser.add_argument(
+        "--tracker-nano-backbone",
+        type=Path,
+        default=DEFAULT_NANO_BACKBONE,
+        help="Local NanoTrack backbone ONNX model path.",
+    )
+    parser.add_argument(
+        "--tracker-nano-neckhead",
+        type=Path,
+        default=DEFAULT_NANO_NECKHEAD,
+        help="Local NanoTrack head ONNX model path.",
+    )
+    parser.add_argument(
+        "--yunet-model-path",
+        type=Path,
+        default=DEFAULT_YUNET_MODEL,
+        help="Local YuNet ONNX model path for head acquisition.",
+    )
+    parser.add_argument(
         "--enable-guidance",
         action="store_true",
         help="Required. Send bounded commands to local ArduPilot SITL.",
@@ -576,6 +668,22 @@ def plane_tuning_from_args(args: argparse.Namespace) -> PlaneTrackingTuning:
             airspeed_low_persistence_s=float(args.airspeed_low_persistence_s),
         )
     )
+
+
+def tracker_name_from_args(args: argparse.Namespace) -> str:
+    if args.tracker_engine == "nano":
+        return f"NANO:{args.tracker_nano_backbone}:{args.tracker_nano_neckhead}"
+    return str(args.tracker)
+
+
+def validate_tracking_models(args: argparse.Namespace, tracking_mode: str) -> None:
+    if args.tracker_engine == "nano":
+        if not args.tracker_nano_backbone.exists():
+            raise RuntimeError(f"tracker_nano_backbone_missing path={args.tracker_nano_backbone}")
+        if not args.tracker_nano_neckhead.exists():
+            raise RuntimeError(f"tracker_nano_neckhead_missing path={args.tracker_nano_neckhead}")
+    if tracking_mode in {"head", "person"} and not args.yunet_model_path.exists():
+        raise RuntimeError(f"yunet_model_missing path={args.yunet_model_path}")
 
 
 def clamp_plane_tuning(tuning: PlaneTrackingTuning) -> PlaneTrackingTuning:
@@ -657,6 +765,9 @@ def perspective_correct_error(
 def create_tracker(tracker_name: str) -> object:
     if tracker_name == "TEMPLATE":
         return TemplateMatchingTracker()
+    if tracker_name.startswith("NANO:"):
+        _name, backbone, neckhead = tracker_name.split(":", 2)
+        return NanoTracker(Path(backbone), Path(neckhead))
     direct_factory = getattr(cv2, f"Tracker{tracker_name}_create", None)
     if direct_factory is not None:
         return direct_factory()
@@ -667,6 +778,67 @@ def create_tracker(tracker_name: str) -> object:
     raise RuntimeError(
         f"OpenCV {tracker_name} tracker is unavailable; install opencv-contrib-python"
     )
+
+
+class NanoTracker:
+    def __init__(self, backbone_path: Path, neckhead_path: Path) -> None:
+        if not hasattr(cv2, "TrackerNano_create") or not hasattr(cv2, "TrackerNano_Params"):
+            raise RuntimeError("opencv_tracker_nano_unavailable")
+        if not backbone_path.exists():
+            raise RuntimeError(f"tracker_nano_backbone_missing path={backbone_path}")
+        if not neckhead_path.exists():
+            raise RuntimeError(f"tracker_nano_neckhead_missing path={neckhead_path}")
+        params = cv2.TrackerNano_Params()
+        params.backbone = str(backbone_path)
+        params.neckhead = str(neckhead_path)
+        self._tracker = cv2.TrackerNano_create(params)
+
+    def init(self, frame: object, bbox: tuple[int, int, int, int]) -> bool:
+        return self._tracker.init(frame, bbox) is not False
+
+    def update(self, frame: object) -> tuple[bool, tuple[int, int, int, int]]:
+        detected, bbox = self._tracker.update(frame)
+        rounded = tuple(round(value) for value in bbox)
+        return bool(detected), rounded
+
+    def confidence(self) -> float | None:
+        score = getattr(self._tracker, "getTrackingScore", None)
+        if score is None:
+            return None
+        return float(score())
+
+
+def tracker_confidence(tracker: object | None) -> float | None:
+    if tracker is None:
+        return None
+    confidence = getattr(tracker, "confidence", None)
+    if callable(confidence):
+        value = confidence()
+        if isinstance(value, (int, float)):
+            return clamp(float(value), 0.0, 1.0)
+    return None
+
+
+def tracker_engine_name(
+    custom_tracker: object | None,
+    detector_tracker: object | None,
+) -> str:
+    for tracker in (custom_tracker, detector_tracker):
+        name = getattr(tracker, "engine_name", None)
+        if isinstance(name, str):
+            return name
+    return "unknown"
+
+
+def tracker_last_confidence(
+    custom_tracker: object | None,
+    detector_tracker: object | None,
+) -> float | None:
+    for tracker in (custom_tracker, detector_tracker):
+        value = getattr(tracker, "last_confidence", None)
+        if isinstance(value, (int, float)):
+            return float(value)
+    return None
 
 
 def create_manual_tracker(tracker_name: str) -> object:
@@ -714,6 +886,8 @@ class CustomSelectionTracker:
         self._smoothed_bbox: tuple[int, int, int, int] | None = None
         self._misses = 0
         self._max_held_misses = 12
+        self.last_confidence: float | None = None
+        self.engine_name = "NanoTrack" if tracker_name.startswith("NANO:") else tracker_name
 
     def bbox(self, frame: object) -> tuple[int, int, int, int] | None:
         if not self._selection_file.exists():
@@ -728,10 +902,12 @@ class CustomSelectionTracker:
             self._selection_mtime_ns = mtime_ns
             self._smoothed_bbox = initial_bbox
             self._misses = 0
+            self.last_confidence = tracker_confidence(tracker)
             return initial_bbox
 
         detected, bbox = self._tracker.update(frame)
         frame_height, frame_width = frame.shape[:2]
+        self.last_confidence = tracker_confidence(self._tracker)
         if not detected:
             self._misses += 1
             if self._smoothed_bbox is not None and self._misses <= self._max_held_misses:
@@ -785,6 +961,8 @@ class DetectorBackedTracker:
         self._tracker: object | None = None
         self._smoothed_bbox: tuple[int, int, int, int] | None = None
         self._misses = 0
+        self.last_confidence: float | None = None
+        self.engine_name = "NanoTrack" if tracker_name.startswith("NANO:") else tracker_name
 
     def bbox(self, frame: object) -> tuple[int, int, int, int] | None:
         frame_height, frame_width = frame.shape[:2]
@@ -793,6 +971,7 @@ class DetectorBackedTracker:
 
         detector_bbox = self._detector(frame, self._min_area)
         detected, raw_bbox = self._tracker.update(frame)
+        self.last_confidence = tracker_confidence(self._tracker)
         if detector_bbox is not None and self._is_detection_consistent(
             detector_bbox,
             frame_width,
@@ -843,6 +1022,7 @@ class DetectorBackedTracker:
             return None
         self._tracker = tracker
         self._misses = 0
+        self.last_confidence = tracker_confidence(tracker)
         self._smoothed_bbox = stabilize_bbox(
             self._smoothed_bbox,
             initial_bbox,
@@ -899,6 +1079,8 @@ def bbox_transition_plausible(
     *,
     max_center_jump_norm: float,
     max_size_ratio: float,
+    target_jump_multiplier: float = 2.5,
+    min_jump_floor_px: float = 18.0,
 ) -> bool:
     px, py, pw, ph = previous
     cx, cy, cw, ch = current
@@ -911,11 +1093,14 @@ def bbox_transition_plausible(
         current_center_x - previous_center_x,
         current_center_y - previous_center_y,
     )
+    bbox_scale = max(1.0, float(max(pw, ph)))
+    allowed_target_jump_px = max(min_jump_floor_px, bbox_scale * target_jump_multiplier)
     previous_area = max(1.0, float(pw * ph))
     current_area = max(1.0, float(cw * ch))
     size_ratio = max(previous_area / current_area, current_area / previous_area)
     return (
         center_jump / max(1.0, frame_diag) <= max_center_jump_norm
+        and center_jump <= allowed_target_jump_px
         and size_ratio <= max_size_ratio
     )
 
@@ -1850,12 +2035,18 @@ def main() -> int:
 
     custom_tracker = None
     tracking_mode = "red" if args.tracking_mode == "orange" else args.tracking_mode
+    try:
+        validate_tracking_models(args, tracking_mode)
+    except RuntimeError as exc:
+        print(f"sitl_tracking_status=failed reason={exc}", flush=True)
+        return 2
+    tracker_name = tracker_name_from_args(args)
     detector_tracker = None
     if tracking_mode in {"custom", "head", "person"}:
         if args.selection_file is None:
             print("sitl_tracking_status=failed reason=missing_custom_selection_file", flush=True)
             return 2
-        custom_tracker = CustomSelectionTracker(args.tracker, args.selection_file)
+        custom_tracker = CustomSelectionTracker(tracker_name, args.selection_file)
     else:
         detector = detect_banner_target if tracking_mode == "banner" else detect_colored_target
         detector_tracker = DetectorBackedTracker(args.tracker, args.min_area, detector)
@@ -1872,6 +2063,8 @@ def main() -> int:
     control_authority_active = False
     plane_tracking_started = vehicle != "plane"
     current_mode: str | None = None
+    runtime_metrics = RuntimeMetrics()
+    previous_control_tick_ns: int | None = None
     low_airspeed_since: float | None = None
     last_detection_time: float | None = None
     plane_heading_deg = 0.0
@@ -1893,6 +2086,8 @@ def main() -> int:
     roll_pwm_report = 1500
     pitch_pwm_report = 1500
     throttle_pwm_report = 1000
+    tracker_confidence_report: float | None = None
+    tracker_engine_report = "unknown"
     plane_response_model = plane_response_model_from_params(plane_tuning, {})
     if vehicle == "plane":
         if args.read_plane_params:
@@ -1988,6 +2183,16 @@ def main() -> int:
     try:
         while running:
             now = time.monotonic()
+            control_tick_ns = time.monotonic_ns()
+            if previous_control_tick_ns is not None:
+                control_period_ms = (control_tick_ns - previous_control_tick_ns) / 1_000_000.0
+                runtime_metrics.observe("control_period_ms", control_period_ms)
+                control_jitter_ms = abs(control_period_ms - period_s * 1000.0)
+                runtime_metrics.observe("control_jitter_ms", control_jitter_ms)
+                if control_period_ms > period_s * 1500.0:
+                    runtime_metrics.increment("deadline_misses")
+            previous_control_tick_ns = control_tick_ns
+            runtime_metrics.mark("control", control_tick_ns)
             if now - last_gcs_heartbeat_monotonic >= 0.5:
                 send_client_heartbeat(connection)
                 last_gcs_heartbeat_monotonic = now
@@ -2035,11 +2240,22 @@ def main() -> int:
                     plane_response_model.raw_params,
                 )
             if frame_reader is not None:
+                capture_start_ns = time.monotonic_ns()
                 ok, frame, frame_age_s = frame_reader.read()
+                runtime_metrics.observe(
+                    "capture_ms",
+                    (time.monotonic_ns() - capture_start_ns) / 1_000_000.0,
+                )
             else:
+                capture_start_ns = time.monotonic_ns()
                 ok, frame = frame_from_source(capture, args.camera_dir)
+                runtime_metrics.observe(
+                    "capture_ms",
+                    (time.monotonic_ns() - capture_start_ns) / 1_000_000.0,
+                )
                 frame_age_s = None
             if not ok or frame is None:
+                runtime_metrics.increment("dropped_frames")
                 if vehicle == "plane":
                     frame_age_ms = (time.monotonic() - last_valid_frame_monotonic) * 1000.0
                     if frame_age_ms > max(100.0, float(args.max_frame_age_ms)):
@@ -2065,18 +2281,31 @@ def main() -> int:
                 continue
 
             frames += 1
+            runtime_metrics.mark("capture", time.monotonic_ns())
             last_valid_frame_monotonic = time.monotonic()
             try:
+                vision_start_ns = time.monotonic_ns()
                 bbox = (
                     custom_tracker.bbox(frame)
                     if custom_tracker is not None
                     else detector_tracker.bbox(frame)
                 )
+                runtime_metrics.observe(
+                    "vision_ms",
+                    (time.monotonic_ns() - vision_start_ns) / 1_000_000.0,
+                )
+                runtime_metrics.mark("vision", time.monotonic_ns())
             except RuntimeError as exc:
+                runtime_metrics.increment("tracker_failures")
                 print(f"sitl_tracking_status=failed reason={exc}", flush=True)
                 return 1
             now = time.monotonic()
             if bbox is None:
+                tracker_confidence_report = tracker_last_confidence(
+                    custom_tracker,
+                    detector_tracker,
+                )
+                runtime_metrics.increment("tracker_failures")
                 hold_attitude = False
                 if vehicle == "quad":
                     send_body_velocity(connection, target_system, target_component, 0, 0, 0, 0)
@@ -2093,6 +2322,11 @@ def main() -> int:
                                 "vehicle": vehicle,
                                 "tracking_state": "WAIT_TARGET",
                                 "control_authority": False,
+                                "tracker_confidence": tracker_confidence_report,
+                                "tracker_engine": tracker_engine_name(
+                                    custom_tracker,
+                                    detector_tracker,
+                                ),
                                 "tracking_tuning_revision": plane_tuning.revision,
                                 "failsafe": False,
                             },
@@ -2246,6 +2480,8 @@ def main() -> int:
                 continue
 
             detections += 1
+            tracker_confidence_report = tracker_last_confidence(custom_tracker, detector_tracker)
+            tracker_engine_report = tracker_engine_name(custom_tracker, detector_tracker)
             last_detection_time = now
             x, y, width, height = bbox
             frame_height, frame_width = frame.shape[:2]
@@ -2347,10 +2583,12 @@ def main() -> int:
                 args.max_yaw_rate_deg_s,
             )
             forward_mps = args.forward_mps if abs(error_x) < 0.25 else 0.0
+            guidance_start_ns = time.monotonic_ns()
 
             if vehicle == "quad":
                 pitch_report = 0.0
                 roll_report = 0.0
+                mavlink_tx_start_ns = time.monotonic_ns()
                 send_body_velocity(
                     connection,
                     target_system,
@@ -2360,6 +2598,11 @@ def main() -> int:
                     down_mps,
                     yaw_rate,
                 )
+                runtime_metrics.observe(
+                    "mavlink_tx_ms",
+                    (time.monotonic_ns() - mavlink_tx_start_ns) / 1_000_000.0,
+                )
+                runtime_metrics.mark("mavlink_tx", time.monotonic_ns())
             else:
                 if not args.surface_test:
                     (
@@ -2549,6 +2792,11 @@ def main() -> int:
                 airspeed_report = plane_airspeed_mps
                 pitch_report = pitch_deg
                 roll_report = roll_deg
+                runtime_metrics.observe(
+                    "guidance_ms",
+                    (time.monotonic_ns() - guidance_start_ns) / 1_000_000.0,
+                )
+                mavlink_tx_start_ns = time.monotonic_ns()
                 send_plane_rc_attitude(
                     connection,
                     roll_deg,
@@ -2567,6 +2815,11 @@ def main() -> int:
                     plane_response_model.roll_rc_reversed,
                     plane_response_model.rc_calibration,
                 )
+                runtime_metrics.observe(
+                    "mavlink_tx_ms",
+                    (time.monotonic_ns() - mavlink_tx_start_ns) / 1_000_000.0,
+                )
+                runtime_metrics.mark("mavlink_tx", time.monotonic_ns())
                 control_authority_active = True
                 (
                     roll_pwm_report,
@@ -2610,6 +2863,13 @@ def main() -> int:
                         ),
                         "rate_hz": args.rate_hz,
                         "frame_age_ms": frame_age_s * 1000.0 if frame_age_s is not None else None,
+                        "tracking_result_age_ms": 0.0,
+                        "command_age_ms": 0.0,
+                        "tracker_confidence": tracker_confidence_report,
+                        "tracker_engine": tracker_engine_report,
+                        "vision_state": "TRACK",
+                        "control_authority": "VULTURE-X",
+                        "rc_override_active": True,
                         "target_proximity": target_proximity,
                         "throttle": throttle_report,
                         "airspeed_mps": airspeed_report,
@@ -2619,8 +2879,14 @@ def main() -> int:
                             plane_response_model.max_pitch_down_deg,
                         ),
                         "tracking_tuning_revision": plane_tuning.revision,
+                        "runtime_metrics": runtime_metrics.summary(),
                         "failsafe": False,
                     },
+                )
+            if vehicle == "quad":
+                runtime_metrics.observe(
+                    "guidance_ms",
+                    (time.monotonic_ns() - guidance_start_ns) / 1_000_000.0,
                 )
             last_command = now
 

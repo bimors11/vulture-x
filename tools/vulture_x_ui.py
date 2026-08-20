@@ -48,6 +48,9 @@ DEMAND_STATE_PATH = LOG_DIR / "tracking_demand.json"
 TRACKING_TUNING_PATH = LOG_DIR / "tracking_tuning.json"
 PLANE_PARAM_CACHE_PATH = LOG_DIR / "plane_params_cache.json"
 HEAD_DETECTION_MAX_WIDTH = 420
+DEFAULT_NANO_BACKBONE = REPO_ROOT / "models" / "opencv" / "nanotrack" / "nanotrack_backbone_sim.onnx"
+DEFAULT_NANO_NECKHEAD = REPO_ROOT / "models" / "opencv" / "nanotrack" / "nanotrack_head_sim.onnx"
+DEFAULT_YUNET_MODEL = REPO_ROOT / "models" / "opencv" / "yunet" / "face_detection_yunet_2023mar.onnx"
 SIM_MAVLINK_ENDPOINT = os.environ.get(
     "VULTURE_X_SIM_MAVLINK",
     os.environ.get("VULTURE_X_MAVLINK", "udpin:0.0.0.0:14550"),
@@ -96,6 +99,8 @@ DEFAULT_MAX_FRAME_AGE_MS = 750.0
 CAMERA_STREAM_ENABLE_RETRY_S = (0.0, 1.0, 2.5, 5.0, 8.0)
 CAMERA_START_WAIT_S = 5.0
 HEAD_DETECTION_CACHE: dict[str, object] = {"key": None, "heads": []}
+YUNET_INPUT_SIZE = (320, 320)
+YUNET_SCORE_THRESHOLD = 0.85
 
 
 class VehicleProfile(NamedTuple):
@@ -666,6 +671,10 @@ HTML = r"""<!doctype html>
         <div class="status-grid" id="status"></div>
       </section>
       <section>
+        <h2>Runtime Performance</h2>
+        <div class="status-grid" id="runtime-performance"></div>
+      </section>
+      <section>
         <h2>Connections</h2>
         <div class="connection-grid">
           <label>Control MAVLink endpoint
@@ -737,6 +746,20 @@ HTML = r"""<!doctype html>
         <label>Stream refresh FPS
           <input id="stream-fps" type="number" min="1" max="60" step="1" value="30">
         </label>
+        <div class="mode-row">
+          <label>HUD
+            <select id="hud-enabled">
+              <option value="1" selected>On</option>
+              <option value="0">Off</option>
+            </select>
+          </label>
+          <label>HUD Mode
+            <select id="hud-mode">
+              <option value="operational" selected>Operational</option>
+              <option value="diagnostic">Diagnostic</option>
+            </select>
+          </label>
+        </div>
         <div class="camera-stage" id="camera-stage">
           <img id="camera" src="/api/frame.jpg" alt="camera frame" draggable="false">
           <div id="selection-box"></div>
@@ -1037,6 +1060,7 @@ HTML = r"""<!doctype html>
         row('Target', target, data.target.detected),
         row('Steering', data.processes.steering ? 'running' : 'idle', !data.processes.steering),
       ].join('');
+      updateRuntimePerformance(data.demand || {});
       currentVehicleMode = data.vehicle.mode;
       currentVideoSource = data.video.source || currentVideoSource;
       document.getElementById('quad-fields').hidden = currentVehicleMode !== 'quad';
@@ -1091,9 +1115,34 @@ HTML = r"""<!doctype html>
         item('State', warn),
       ].join('');
     }
+    function metricValue(metrics, key, suffix, decimals = 1) {
+      const value = metrics ? metrics[key] : null;
+      return Number.isFinite(Number(value)) ? Number(value).toFixed(decimals) + suffix : '-';
+    }
+    function updateRuntimePerformance(demand) {
+      const element = document.getElementById('runtime-performance');
+      if (!element) return;
+      const metrics = demand.runtime_metrics || {};
+      element.innerHTML = [
+        row('Camera FPS', metricValue(metrics, 'capture_hz', ' Hz'), true),
+        row('Vision FPS', metricValue(metrics, 'vision_hz', ' Hz'), true),
+        row('Control Hz', metricValue(metrics, 'control_hz', ' Hz'), true),
+        row('MAVLink TX', metricValue(metrics, 'mavlink_tx_hz', ' Hz'), true),
+        row('Vision P95', metricValue(metrics, 'vision_ms_p95', ' ms'), true),
+        row('Frame Age', demand.frame_age_ms == null ? '-' : Number(demand.frame_age_ms).toFixed(0) + ' ms', true),
+        row('Result Age', demand.tracking_result_age_ms == null ? '-' : Number(demand.tracking_result_age_ms).toFixed(0) + ' ms', true),
+        row('Jitter P95', metricValue(metrics, 'control_jitter_ms_p95', ' ms'), true),
+        row('Dropped Frames', String(metrics.dropped_frames ?? 0), Number(metrics.dropped_frames ?? 0) === 0),
+        row('Deadline Misses', String(metrics.deadline_misses ?? 0), Number(metrics.deadline_misses ?? 0) === 0),
+        row('Tracker Failures', String(metrics.tracker_failures ?? 0), Number(metrics.tracker_failures ?? 0) === 0),
+      ].join('');
+    }
     function refreshFrame() {
       const mode = encodeURIComponent(document.getElementById('tracking-mode').value || 'red');
-      document.getElementById('camera').src = '/api/frame.jpg?mode=' + mode + '&t=' + Date.now();
+      const hudMode = encodeURIComponent(document.getElementById('hud-mode').value || 'operational');
+      const hud = encodeURIComponent(document.getElementById('hud-enabled').value || '1');
+      document.getElementById('camera').src =
+        '/api/frame.jpg?mode=' + mode + '&hud_mode=' + hudMode + '&hud=' + hud + '&t=' + Date.now();
     }
     async function saveSelection(selection) {
       const response = await fetch('/api/selection', {
@@ -1223,7 +1272,9 @@ HTML = r"""<!doctype html>
     async function poll() {
       try {
         const mode = encodeURIComponent(document.getElementById('tracking-mode').value || 'red');
-        const response = await fetch('/api/status?mode=' + mode);
+        const hudMode = encodeURIComponent(document.getElementById('hud-mode').value || 'operational');
+        const hud = encodeURIComponent(document.getElementById('hud-enabled').value || '1');
+        const response = await fetch('/api/status?mode=' + mode + '&hud_mode=' + hudMode + '&hud=' + hud);
         refresh(await response.json());
       } catch (error) {
         document.getElementById('system-log').textContent = String(error);
@@ -1780,6 +1831,14 @@ class AppState:
             str(vertical_gain),
             "--tracking-mode",
             tracking_mode,
+            "--tracker-engine",
+            "nano" if tracking_mode in {"custom", "head"} else "template",
+            "--tracker-nano-backbone",
+            str(DEFAULT_NANO_BACKBONE),
+            "--tracker-nano-neckhead",
+            str(DEFAULT_NANO_NECKHEAD),
+            "--yunet-model-path",
+            str(DEFAULT_YUNET_MODEL),
             "--demand-state-file",
             str(DEMAND_STATE_PATH),
             "--plane-param-cache-file",
@@ -2239,9 +2298,46 @@ def cached_heads(frame: Any, image_path: Path) -> list[tuple[int, int, int, int]
         cached = HEAD_DETECTION_CACHE.get("heads")
         if isinstance(cached, list):
             return cached
-    heads = detect_heads(frame, max_width=HEAD_DETECTION_MAX_WIDTH)
+    heads = detect_heads_yunet(frame)
     HEAD_DETECTION_CACHE["key"] = frame_key
     HEAD_DETECTION_CACHE["heads"] = heads
+    return heads
+
+
+def detect_heads_yunet(frame: Any) -> list[tuple[int, int, int, int]]:
+    if not DEFAULT_YUNET_MODEL.exists() or not hasattr(cv2, "FaceDetectorYN_create"):
+        return detect_heads(frame, max_width=HEAD_DETECTION_MAX_WIDTH)
+    frame_height, frame_width = frame.shape[:2]
+    input_width, input_height = YUNET_INPUT_SIZE
+    resized = cv2.resize(frame, (input_width, input_height), interpolation=cv2.INTER_AREA)
+    detector = cv2.FaceDetectorYN_create(
+        str(DEFAULT_YUNET_MODEL),
+        "",
+        (input_width, input_height),
+        YUNET_SCORE_THRESHOLD,
+        0.3,
+        20,
+    )
+    _retval, faces = detector.detect(resized)
+    if faces is None:
+        return []
+    scale_x = frame_width / input_width
+    scale_y = frame_height / input_height
+    heads: list[tuple[int, int, int, int]] = []
+    for face in faces:
+        x, y, width, height = (float(face[index]) for index in range(4))
+        heads.append(
+            clamp_bbox(
+                (
+                    round(x * scale_x),
+                    round(y * scale_y),
+                    round(width * scale_x),
+                    round(height * scale_y),
+                ),
+                frame_width,
+                frame_height,
+            )
+        )
     return heads
 
 
@@ -2414,6 +2510,14 @@ def mavlink_status() -> dict[str, Any]:
     return status
 
 
+def normalize_hud_mode(value: str) -> str:
+    return value if value in {"operational", "diagnostic"} else "operational"
+
+
+def hud_enabled_from_query(value: str) -> bool:
+    return value not in {"0", "false", "False", "off", "OFF"}
+
+
 def send_client_heartbeat(connection: mavutil.mavfile) -> None:
     connection.mav.heartbeat_send(
         mavutil.mavlink.MAV_TYPE_GCS,
@@ -2424,7 +2528,12 @@ def send_client_heartbeat(connection: mavutil.mavfile) -> None:
     )
 
 
-def latest_target(display_mode: str = "red") -> tuple[dict[str, Any], bytes | None]:
+def latest_target(
+    display_mode: str = "red",
+    *,
+    hud_mode: str = "operational",
+    hud_enabled: bool = True,
+) -> tuple[dict[str, Any], bytes | None]:
     if display_mode not in {"red", "banner", "custom", "head", "person"}:
         display_mode = "red"
     camera_dir = active_camera_dir()
@@ -2439,11 +2548,12 @@ def latest_target(display_mode: str = "red") -> tuple[dict[str, Any], bytes | No
     frame = read_camera_frame(image_path)
     if frame is None:
         return {"detected": False, "detail": "frame unreadable"}, None
+    overlay_start_ns = time.monotonic_ns()
     saved_selection = load_selection()
     selection = None if display_mode == "banner" else saved_selection
     heads: list[tuple[int, int, int, int]] = []
+    demand = load_demand_state()
     if selection is not None:
-        demand = load_demand_state()
         bbox = None
         if (
             demand is not None
@@ -2480,17 +2590,6 @@ def latest_target(display_mode: str = "red") -> tuple[dict[str, Any], bytes | No
             "center_y": center_y,
             "camera_dir": str(camera_dir),
         }
-        color = (255, 180, 60) if selection is not None else (0, 255, 255)
-        if selection is None and display_mode == "banner":
-            color = (80, 220, 255)
-        cv2.rectangle(frame, (x, y), (x + width, y + height), color, 2)
-        cv2.circle(
-            frame,
-            (int(center_x * frame_width), int(center_y * frame_height)),
-            4,
-            color,
-            -1,
-        )
     elif selection is not None:
         target = {
             "detected": False,
@@ -2502,7 +2601,7 @@ def latest_target(display_mode: str = "red") -> tuple[dict[str, Any], bytes | No
         sy = int(float(selection["y"]) * frame_height)
         sw = int(float(selection["width"]) * frame_width)
         sh = int(float(selection["height"]) * frame_height)
-        cv2.rectangle(frame, (sx, sy), (sx + sw, sy + sh), (90, 90, 255), 2)
+        target["reference_bbox"] = [sx, sy, sw, sh]
     elif display_mode in {"head", "person"}:
         target = {
             "detected": False,
@@ -2510,9 +2609,10 @@ def latest_target(display_mode: str = "red") -> tuple[dict[str, Any], bytes | No
             "detail": "select a head/face",
             "head_count": len(heads),
         }
-        draw_heads_overlay(frame, heads)
-    draw_center_overlay(frame)
-    draw_demand_overlay(frame, target)
+    if hud_enabled:
+        render_hud(frame, target, demand, mavlink_status(), heads, normalize_hud_mode(hud_mode))
+    overlay_ms = (time.monotonic_ns() - overlay_start_ns) / 1_000_000.0
+    target["overlay_render_ms"] = overlay_ms
     ok, encoded = cv2.imencode(".jpg", frame)
     return target, encoded.tobytes() if ok else None
 
@@ -2549,112 +2649,310 @@ def demand_bbox(payload: dict[str, Any], frame: Any) -> tuple[int, int, int, int
     return clamp_bbox(bbox, frame_width, frame_height)
 
 
-def draw_label(frame: Any, lines: list[str], origin: tuple[int, int]) -> None:
-    if not lines:
-        return
-    x, y = origin
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 0.48
-    thickness = 1
-    line_height = 18
-    width = 0
-    for line in lines:
-        (text_width, _text_height), _baseline = cv2.getTextSize(line, font, scale, thickness)
-        width = max(width, text_width)
-    height = line_height * len(lines) + 10
-    cv2.rectangle(frame, (x, y), (x + width + 12, y + height), (0, 0, 0), -1)
-    cv2.rectangle(frame, (x, y), (x + width + 12, y + height), (255, 255, 255), 1)
-    for index, line in enumerate(lines):
-        cv2.putText(
+def hud_scale(frame: Any) -> float:
+    frame_height, frame_width = frame.shape[:2]
+    return max(0.75, min(2.2, min(frame_width / 1280.0, frame_height / 720.0)))
+
+
+def semantic_color(state: str) -> tuple[int, int, int]:
+    if state == "green":
+        return (90, 230, 120)
+    if state == "amber":
+        return (0, 210, 255)
+    if state == "red":
+        return (80, 90, 255)
+    return (245, 245, 245)
+
+
+def outlined_text(
+    frame: Any,
+    text: str,
+    origin: tuple[int, int],
+    *,
+    scale: float,
+    color: tuple[int, int, int] = (245, 245, 245),
+    thickness: int = 1,
+) -> None:
+    cv2.putText(
+        frame,
+        text,
+        origin,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        scale,
+        (0, 0, 0),
+        thickness + 2,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        frame,
+        text,
+        origin,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        scale,
+        color,
+        thickness,
+        cv2.LINE_AA,
+    )
+
+
+def draw_corner_brackets(
+    frame: Any,
+    bbox: tuple[int, int, int, int],
+    color: tuple[int, int, int],
+    *,
+    label: str | None = None,
+) -> None:
+    x, y, width, height = bbox
+    scale = hud_scale(frame)
+    thickness = max(1, round(2 * scale))
+    shadow = (0, 0, 0)
+    corner = round(max(10.0 * scale, min(width * 0.24, height * 0.24, 34.0 * scale)))
+    points = [
+        ((x, y), (x + corner, y)),
+        ((x, y), (x, y + corner)),
+        ((x + width, y), (x + width - corner, y)),
+        ((x + width, y), (x + width, y + corner)),
+        ((x, y + height), (x + corner, y + height)),
+        ((x, y + height), (x, y + height - corner)),
+        ((x + width, y + height), (x + width - corner, y + height)),
+        ((x + width, y + height), (x + width, y + height - corner)),
+    ]
+    for start, end in points:
+        cv2.line(frame, start, end, shadow, thickness + 2, cv2.LINE_AA)
+        cv2.line(frame, start, end, color, thickness, cv2.LINE_AA)
+    if label:
+        outlined_text(
             frame,
-            line,
-            (x + 6, y + 18 + index * line_height),
-            font,
-            scale,
-            (255, 255, 255),
-            thickness,
-            cv2.LINE_AA,
+            label,
+            (x, max(18, y - round(8 * scale))),
+            scale=0.46 * scale,
+            color=color,
+            thickness=thickness,
         )
 
 
-def draw_demand_overlay(frame: Any, target: dict[str, Any]) -> None:
-    demand = load_demand_state()
-    if demand is None:
-        return
+def command_cue_point(
+    frame: Any,
+    demand: dict[str, Any] | None,
+) -> tuple[int, int]:
     frame_height, frame_width = frame.shape[:2]
-    center = (frame_width // 2, frame_height // 2)
-    if target.get("detected"):
-        target_x = int(float(target.get("center_x", 0.5)) * frame_width)
-        target_y = int(float(target.get("center_y", 0.5)) * frame_height)
-        cv2.arrowedLine(frame, center, (target_x, target_y), (80, 255, 80), 2, tipLength=0.08)
-
+    center_x = frame_width // 2
+    center_y = frame_height // 2
+    if demand is None:
+        return center_x, center_y
     roll_deg = demand_float(demand, "roll_deg")
     pitch_deg = demand_float(demand, "pitch_deg")
     max_roll_deg = max(1.0, demand_float(demand, "max_roll_deg", MAX_FIXED_WING_ROLL_DEG))
     max_pitch_deg = max(1.0, demand_float(demand, "max_pitch_deg", MAX_FIXED_WING_PITCH_DEG))
-    demand_x = center[0] + round((roll_deg / max_roll_deg) * frame_width * 0.34)
-    demand_y = center[1] - round((pitch_deg / max_pitch_deg) * frame_height * 0.34)
-    demand_x = max(0, min(frame_width - 1, demand_x))
-    demand_y = max(0, min(frame_height - 1, demand_y))
-    cv2.arrowedLine(frame, center, (demand_x, demand_y), (0, 220, 255), 3, tipLength=0.16)
-    cv2.circle(frame, (demand_x, demand_y), 5, (0, 220, 255), -1)
-
-    roll_pwm = round(demand_float(demand, "roll_pwm", 1500.0))
-    pitch_pwm = round(demand_float(demand, "pitch_pwm", 1500.0))
-    frame_age_ms = demand.get("frame_age_ms")
-    age_text = "age --ms"
-    if isinstance(frame_age_ms, (int, float)):
-        age_text = f"age {frame_age_ms:.0f}ms"
-    lines = [
-        f"demand {demand_float(demand, 'rate_hz', 0.0):.0f} Hz",
-        f"roll {roll_deg:+.1f} deg pwm {roll_pwm}",
-        f"pitch {pitch_deg:+.1f} deg pwm {pitch_pwm}",
-        age_text,
-    ]
-    if not demand.get("detected", False):
-        lines.append(str(demand.get("loss_behavior", "target lost")))
-    draw_label(frame, lines, (10, 10))
+    if abs(roll_deg) < 0.4:
+        roll_deg = 0.0
+    if abs(pitch_deg) < 0.4:
+        pitch_deg = 0.0
+    cue_radius_x = frame_width * 0.22
+    cue_radius_y = frame_height * 0.22
+    cue_x = center_x + round(max(-1.0, min(1.0, roll_deg / max_roll_deg)) * cue_radius_x)
+    cue_y = center_y - round(max(-1.0, min(1.0, pitch_deg / max_pitch_deg)) * cue_radius_y)
+    return max(0, min(frame_width - 1, cue_x)), max(0, min(frame_height - 1, cue_y))
 
 
 def draw_center_overlay(frame: Any) -> None:
     frame_height, frame_width = frame.shape[:2]
-    box_width = max(24, round(frame_width * 0.16))
-    box_height = max(18, round(frame_height * 0.16))
     center_x = frame_width // 2
     center_y = frame_height // 2
-    left = center_x - box_width // 2
-    top = center_y - box_height // 2
-    right = center_x + box_width // 2
-    bottom = center_y + box_height // 2
-    color = (255, 255, 255)
+    scale = hud_scale(frame)
+    gap = round(13 * scale)
+    length = round(18 * scale)
+    thickness = max(1, round(scale))
+    color = (245, 245, 245)
     shadow = (0, 0, 0)
-    cv2.rectangle(frame, (left, top), (right, bottom), shadow, 3)
-    cv2.rectangle(frame, (left, top), (right, bottom), color, 1)
-    cv2.line(frame, (center_x - 10, center_y), (center_x + 10, center_y), shadow, 3)
-    cv2.line(frame, (center_x, center_y - 10), (center_x, center_y + 10), shadow, 3)
-    cv2.line(frame, (center_x - 10, center_y), (center_x + 10, center_y), color, 1)
-    cv2.line(frame, (center_x, center_y - 10), (center_x, center_y + 10), color, 1)
+    segments = [
+        ((center_x - gap - length, center_y), (center_x - gap, center_y)),
+        ((center_x + gap, center_y), (center_x + gap + length, center_y)),
+        ((center_x, center_y - gap - length), (center_x, center_y - gap)),
+        ((center_x, center_y + gap), (center_x, center_y + gap + length)),
+    ]
+    for start, end in segments:
+        cv2.line(frame, start, end, shadow, thickness + 2, cv2.LINE_AA)
+        cv2.line(frame, start, end, color, thickness, cv2.LINE_AA)
+    cv2.drawMarker(
+        frame,
+        (center_x, center_y),
+        shadow,
+        cv2.MARKER_CROSS,
+        round(8 * scale),
+        thickness + 2,
+        cv2.LINE_AA,
+    )
+    cv2.drawMarker(
+        frame,
+        (center_x, center_y),
+        color,
+        cv2.MARKER_CROSS,
+        round(8 * scale),
+        thickness,
+        cv2.LINE_AA,
+    )
+
+
+def vision_state(target: dict[str, Any], demand: dict[str, Any] | None) -> tuple[str, str]:
+    if demand and demand.get("failsafe"):
+        reason = str(demand.get("failsafe_reason", "released")).replace("_", " ").upper()
+        return "TARGET LOST" if reason == "TARGET LOST" else reason, "red"
+    if demand and isinstance(demand.get("vision_state"), str):
+        state = str(demand["vision_state"]).upper()
+        if state == "TRACK":
+            return "TRACK LOCK", "green"
+        if state == "DEGRADED":
+            return "TRACK DEGRADED", "amber"
+        if state == "LOST":
+            return "TARGET LOST", "red"
+    if target.get("detected"):
+        return "TARGET READY", "amber"
+    return "TARGET ACQUIRING", "amber"
+
+
+def control_authority_text(demand: dict[str, Any] | None) -> str:
+    if demand is None:
+        return "CTRL AUTOPILOT"
+    if demand.get("rc_override_active"):
+        return "CTRL VULTURE-X"
+    if demand.get("failsafe"):
+        return "CTRL PILOT"
+    return str(demand.get("control_authority", "CTRL AUTOPILOT"))
+
+
+def confidence_text(demand: dict[str, Any] | None) -> str:
+    confidence = demand.get("tracker_confidence") if demand else None
+    if not isinstance(confidence, (int, float)):
+        return "CONF --"
+    return f"CONF {max(0.0, min(1.0, float(confidence))) * 100.0:.0f}%"
+
+
+def age_text(demand: dict[str, Any] | None) -> str:
+    if demand is None:
+        return "AGE --"
+    age = demand.get("tracking_result_age_ms", demand.get("frame_age_ms"))
+    if not isinstance(age, (int, float)):
+        return "AGE --"
+    return f"AGE {float(age):.0f} ms"
+
+
+def draw_top_bar(
+    frame: Any,
+    state_label: str,
+    state_style: str,
+    mavlink: dict[str, Any],
+) -> None:
+    scale = hud_scale(frame)
+    mode = str(mavlink.get("mode", "offline")).upper()
+    link = "LINK" if mavlink.get("connected") else "LINK LOST"
+    color = semantic_color(state_style)
+    text = f"VULTURE-X     {state_label}     {mode}     {link}"
+    outlined_text(frame, text, (round(16 * scale), round(28 * scale)), scale=0.58 * scale, color=color, thickness=max(1, round(2 * scale)))
+
+
+def draw_bottom_strip(frame: Any, demand: dict[str, Any] | None) -> None:
+    frame_height, _frame_width = frame.shape[:2]
+    scale = hud_scale(frame)
+    alt = demand.get("relative_alt_m") if demand else None
+    speed = demand.get("airspeed_mps") if demand else None
+    alt_text = f"ALT {float(alt):.0f} m" if isinstance(alt, (int, float)) else "ALT --"
+    speed_text = f"SPD {float(speed):.1f} m/s" if isinstance(speed, (int, float)) else "SPD --"
+    text = f"{alt_text}     {speed_text}     {confidence_text(demand)}     {age_text(demand)}"
+    outlined_text(frame, text, (round(16 * scale), frame_height - round(18 * scale)), scale=0.52 * scale, thickness=max(1, round(2 * scale)))
+
+
+def render_hud(
+    frame: Any,
+    target: dict[str, Any],
+    demand: dict[str, Any] | None,
+    mavlink: dict[str, Any],
+    heads: list[tuple[int, int, int, int]],
+    hud_mode: str,
+) -> None:
+    state_label, state_style = vision_state(target, demand)
+    color = semantic_color(state_style)
+    draw_top_bar(frame, state_label, state_style, mavlink)
+    if target.get("detected") and "bbox" in target:
+        draw_corner_brackets(
+            frame,
+            tuple(int(value) for value in target["bbox"]),
+            color,
+            label="LOCK" if state_style == "green" else "ACQ",
+        )
+    elif "reference_bbox" in target and hud_mode == "diagnostic":
+        draw_corner_brackets(
+            frame,
+            tuple(int(value) for value in target["reference_bbox"]),
+            semantic_color("amber"),
+            label="REF",
+        )
+    for index, head_bbox in enumerate(heads, start=1):
+        draw_corner_brackets(frame, head_bbox, semantic_color("amber"), label=str(index))
+    draw_center_overlay(frame)
+    cue = command_cue_point(frame, demand)
+    cv2.circle(frame, cue, max(5, round(6 * hud_scale(frame))), (0, 0, 0), 3, cv2.LINE_AA)
+    cv2.circle(frame, cue, max(4, round(5 * hud_scale(frame))), semantic_color("amber"), 1, cv2.LINE_AA)
+    outlined_text(frame, "CMD", (cue[0] + 8, cue[1] + 18), scale=0.36 * hud_scale(frame), color=semantic_color("amber"))
+    outlined_text(frame, control_authority_text(demand), (round(16 * hud_scale(frame)), round(52 * hud_scale(frame))), scale=0.42 * hud_scale(frame), color=semantic_color("green" if demand and demand.get("rc_override_active") else "amber"))
+    draw_bottom_strip(frame, demand)
+    if hud_mode == "diagnostic":
+        draw_diagnostic_hud(frame, target, demand)
+
+
+def draw_diagnostic_hud(
+    frame: Any,
+    target: dict[str, Any],
+    demand: dict[str, Any] | None,
+) -> None:
+    scale = hud_scale(frame)
+    metrics = demand.get("runtime_metrics", {}) if demand else {}
+    lines = [
+        "TRACKER Template",
+        f"STATE {vision_state(target, demand)[0]}",
+        confidence_text(demand),
+        f"VISION {metric_text(metrics, 'vision_hz', 'Hz')} {metric_text(metrics, 'vision_ms_p95', 'ms P95')}",
+        f"CONTROL {metric_text(metrics, 'control_hz', 'Hz')} JIT {metric_text(metrics, 'control_jitter_ms_p95', 'ms P95')}",
+        f"MAV TX {metric_text(metrics, 'mavlink_tx_hz', 'Hz')}",
+    ]
+    if demand:
+        lines.extend(
+            [
+                f"ROLL {demand_float(demand, 'roll_deg'):+.1f} PITCH {demand_float(demand, 'pitch_deg'):+.1f}",
+                f"THR {demand_float(demand, 'throttle'):.2f}",
+                f"PWM R {round(demand_float(demand, 'roll_pwm', 1500.0))} P {round(demand_float(demand, 'pitch_pwm', 1500.0))} T {round(demand_float(demand, 'throttle_pwm', 1000.0))}",
+                f"PROX {demand_float(demand, 'target_proximity'):.2f}",
+                f"DROPS {metrics.get('dropped_frames', 0)} MISS {metrics.get('deadline_misses', 0)} FAIL {metrics.get('tracker_failures', 0)}",
+            ]
+        )
+    draw_text_block(frame, lines, (round(16 * scale), round(80 * scale)))
+
+
+def metric_text(metrics: object, key: str, suffix: str) -> str:
+    if not isinstance(metrics, dict):
+        return "--"
+    value = metrics.get(key)
+    if not isinstance(value, (int, float)):
+        return "--"
+    return f"{float(value):.1f}{suffix}"
+
+
+def draw_text_block(frame: Any, lines: list[str], origin: tuple[int, int]) -> None:
+    scale = hud_scale(frame)
+    line_height = round(18 * scale)
+    for index, line in enumerate(lines):
+        outlined_text(
+            frame,
+            line,
+            (origin[0], origin[1] + index * line_height),
+            scale=0.42 * scale,
+            color=(245, 245, 245),
+        )
 
 
 def draw_heads_overlay(frame: Any, heads: list[tuple[int, int, int, int]]) -> None:
-    color = (80, 220, 255)
-    shadow = (0, 0, 0)
     for index, (x, y, width, height) in enumerate(heads, start=1):
-        cv2.rectangle(frame, (x, y), (x + width, y + height), shadow, 4)
-        cv2.rectangle(frame, (x, y), (x + width, y + height), color, 2)
-        label = f"H{index}"
-        cv2.rectangle(frame, (x, max(0, y - 22)), (x + 42, y), shadow, -1)
-        cv2.putText(
-            frame,
-            label,
-            (x + 5, max(15, y - 6)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.52,
-            color,
-            2,
-            cv2.LINE_AA,
-        )
-    draw_label(frame, [f"heads {len(heads)}", "click head to lock"], (10, 10))
+        draw_corner_brackets(frame, (x, y, width, height), semantic_color("amber"), label=str(index))
 
 
 def tail(path: Path, lines: int = 80) -> str:
@@ -2665,7 +2963,7 @@ def tail(path: Path, lines: int = 80) -> str:
 
 
 def status_payload(display_mode: str = "red") -> dict[str, Any]:
-    target, _ = latest_target(display_mode)
+    target, _ = latest_target(display_mode, hud_enabled=False)
     port_5600_owners = udp_port_owners(5600)
     camera_dir = active_camera_dir()
     if camera_dir is None and (
@@ -2756,7 +3054,13 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/frame.jpg":
             query = parse_qs(parsed.query)
             display_mode = query.get("mode", ["red"])[0]
-            _, image = latest_target(display_mode)
+            hud_mode = normalize_hud_mode(query.get("hud_mode", ["operational"])[0])
+            hud_enabled = hud_enabled_from_query(query.get("hud", ["1"])[0])
+            _, image = latest_target(
+                display_mode,
+                hud_mode=hud_mode,
+                hud_enabled=hud_enabled,
+            )
             if image is None:
                 self.send_response(HTTPStatus.NO_CONTENT)
                 self.end_headers()

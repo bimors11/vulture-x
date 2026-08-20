@@ -88,10 +88,20 @@ response-model fields. Plane tuning is applied through
 `logs/ui/tracking_tuning.json`; invalid live tuning updates are ignored and the
 last valid values remain active.
 
-OpenCV's classic tracker API and the local template matcher do not provide a
-calibrated confidence score. The first milestone therefore maps a valid
-successful update to confidence `1.0` and a failed/invalid update to `0.0`.
-This is an explicit initial heuristic, not a probabilistic confidence estimate.
+Manual box and head/face tracking use OpenCV NanoTrack by default. Head
+candidate acquisition uses OpenCV YuNet at a small input size, and the selected
+candidate is then tracked by NanoTrack. The legacy template tracker is kept as
+`--tracker-engine template` for diagnostics and A/B comparison. The required
+ONNX files live in `models/opencv/`; runtime startup validates explicit paths
+and does not download models implicitly. Use `python tools/ensure_vision_models.py`
+to verify hashes, or `python tools/ensure_vision_models.py --download` to restore
+missing model files on a second development machine.
+
+NanoTrack exposes `getTrackingScore()`, and Vulture-X reports that value as
+tracker confidence for Nano-backed manual/head tracking. OpenCV's classic
+tracker API and the local template fallback do not provide a calibrated
+confidence score; those paths still use an explicit detected/lost heuristic
+rather than a probabilistic estimate.
 
 Normalized errors use `-1` at the left/top edge, `0` at image center, and `+1`
 at the right/bottom edge.
