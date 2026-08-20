@@ -291,9 +291,10 @@ read the source frame, so it does not become part of the selected ROI or detecto
 input.
 
 The quad steering panel clamps forward speed to `5 m/s`, vertical speed to
-`5 m/s`, and vertical gain to `8.0`. The fixed-wing steering path keeps
-ArduPlane in `FBWA` and sends bounded `RC_CHANNELS_OVERRIDE` roll, pitch,
-throttle, and neutral yaw commands. Target airspeed is passed through
+`5 m/s`, and vertical gain to `8.0`. The fixed-wing steering path validates the
+selected target and safety prerequisites first, requests ArduPlane `FBWA`, waits
+for heartbeat confirmation, then sends bounded `RC_CHANNELS_OVERRIDE` roll,
+pitch, throttle, and neutral yaw commands. Target airspeed is passed through
 `--plane-airspeed-mps` and used by the existing FBWA throttle governor; it is
 not sent through the quad `--forward-mps` path. The WebUI writes live tuning to
 `logs/ui/tracking_tuning.json` atomically, and the tracking helper reloads valid
@@ -302,9 +303,10 @@ proximity only; it is not physical range. Fixed-wing tracking uses
 perspective-corrected image error for roll/pitch centering, estimates target
 proximity from bounding-box apparent size, smooths sudden bbox jumps, filters
 pitch commands, and reduces throttle when measured airspeed rises above the
-target. On stale video, heartbeat timeout, disarm, flight-mode change, target
-loss beyond `plane_loss_hold_s`, low valid altitude, or persistent low valid
-airspeed, the helper releases RC override and stops without changing mode.
+target. On stale video, heartbeat timeout, disarm, pilot/external mode change
+away from `FBWA`, target loss beyond `plane_loss_hold_s`, unknown or low valid
+altitude, or persistent low valid airspeed, the helper releases RC override and
+stops without changing mode.
 
 For a fixed-wing ground-only control-surface response check with a SIYI RTSP
 camera and HM30 telemetry, keep the plane disarmed and run the plane UI in

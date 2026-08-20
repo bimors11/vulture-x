@@ -58,10 +58,13 @@ them from the panel.
 
 `-plane` uses the same ArduPilot checkout, `ArduPlane`, the `gazebo-zephyr`
 frame, and `simulation/worlds/vulture_x_plane.sdf`. The fixed-wing steering
-helper requires `FBWA` and uses bounded `RC_CHANNELS_OVERRIDE` roll, pitch,
-throttle, and neutral yaw commands. In simulator mode it may switch an
-already-armed SITL plane to `FBWA` as a convenience. In manual/hardware mode it
-blocks unless the aircraft is already armed and already in `FBWA`.
+helper accepts an already-armed plane from any initial flight mode, validates
+target lock, fresh video, MAVLink health, altitude, airspeed, and RC override
+configuration, then requests `FBWA` and waits for heartbeat confirmation before
+sending bounded `RC_CHANNELS_OVERRIDE` roll, pitch, throttle, and neutral yaw
+commands. If the aircraft leaves `FBWA` after tracking is active, the helper
+releases RC override, aborts tracking with `pilot_mode_change`, and leaves the
+pilot-selected mode untouched.
 
 The plane takeoff helper is simulator-only. The WebUI must not run
 `tools/sitl_arm_takeoff.py` in manual/hardware mode, and no hardware arming or

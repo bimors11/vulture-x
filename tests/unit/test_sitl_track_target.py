@@ -180,10 +180,10 @@ def test_tracking_timeout_defaults_to_run_until_stopped(monkeypatch) -> None:
     args = module.parse_args()
 
     assert args.timeout_s == 0.0
-    assert args.mavlink_heartbeat_timeout_s == 0.0
+    assert args.mavlink_heartbeat_timeout_s == 3.0
 
 
-def test_legacy_heartbeat_timeout_flag_is_ignored(monkeypatch) -> None:
+def test_heartbeat_timeout_flag_is_configurable(monkeypatch) -> None:
     module = load_tracking_module()
     monkeypatch.setattr(
         sys,
@@ -198,7 +198,7 @@ def test_legacy_heartbeat_timeout_flag_is_ignored(monkeypatch) -> None:
 
     args = module.parse_args()
 
-    assert args.mavlink_heartbeat_timeout_s == 0.0
+    assert args.mavlink_heartbeat_timeout_s == 7.5
 
 
 def test_plane_rc_attitude_maps_negative_pitch_to_lower_elevator_pwm() -> None:
@@ -235,6 +235,27 @@ def test_plane_rc_attitude_can_reverse_pitch_channel() -> None:
         max_pitch_deg=35.0,
         throttle=0.55,
         pitch_rc_reversed=True,
+    )
+
+    call = connection.mav.rc_override_calls[-1]
+    assert call[3] == 1750
+
+
+def test_plane_rc_attitude_does_not_apply_reversal_twice_with_calibration() -> None:
+    module = load_tracking_module()
+    connection = FakeConnection()
+
+    module.send_plane_rc_attitude(
+        connection,
+        roll_deg=0.0,
+        pitch_deg=-17.5,
+        max_roll_deg=35.0,
+        max_pitch_deg=35.0,
+        throttle=0.55,
+        pitch_rc_reversed=True,
+        rc_calibration=module.RcCalibrationSet(
+            pitch=module.RcCalibration(reversed=True),
+        ),
     )
 
     call = connection.mav.rc_override_calls[-1]
@@ -335,13 +356,45 @@ def test_rc_override_sysid_high_zero_uses_single_gcs_id() -> None:
 
     assert (
         module.validate_rc_override_acceptance(
-            {"MAV_GCS_SYSID": 255.0, "MAV_GCS_SYSID_HI": 0.0},
+            {"MAV_OPTIONS": 1.0, "MAV_GCS_SYSID": 255.0, "MAV_GCS_SYSID_HI": 0.0},
             255,
         )
         is None
     )
-    assert module.validate_rc_override_acceptance({"MAV_GCS_SYSID": 255.0}, 42) == (
+    assert module.validate_rc_override_acceptance(
+        {"MAV_OPTIONS": 1.0, "MAV_GCS_SYSID": 255.0},
+        42,
+    ) == (
         "rc_override_sysid_mismatch"
+    )
+
+
+def test_rc_override_sysid_is_not_enforced_when_mav_options_allows_any_gcs() -> None:
+    module = load_tracking_module()
+
+    assert (
+        module.validate_rc_override_acceptance(
+            {"MAV_OPTIONS": 0.0, "MAV_GCS_SYSID": 255.0},
+            42,
+        )
+        is None
+    )
+
+
+def test_rc_override_validation_blocks_disabled_or_infinite_override() -> None:
+    module = load_tracking_module()
+
+    assert (
+        module.validate_rc_override_acceptance({"RC_OPTIONS": 2.0}, 255)
+        == "rc_override_disabled"
+    )
+    assert (
+        module.validate_rc_override_acceptance({"RC_OVERRIDE_TIME": 0.0}, 255)
+        == "rc_override_disabled"
+    )
+    assert (
+        module.validate_rc_override_acceptance({"RC_OVERRIDE_TIME": -1.0}, 255)
+        == "rc_override_disabled"
     )
 
 
@@ -391,14 +444,13 @@ def test_head_tracking_mode_uses_operator_selection(monkeypatch) -> None:
     assert args.tracking_mode == "head"
 
 
-def test_should_reassert_plane_mode_for_rtl() -> None:
+def test_reassert_plane_mode_helper_is_removed() -> None:
     module = load_tracking_module()
 
-    assert module.should_reassert_plane_mode("RTL") is True
-    assert module.should_reassert_plane_mode("FBWA") is False
+    assert not hasattr(module, "should_reassert_plane_mode")
 
 
-def test_verify_connection_auto_switches_plane_to_fbwa(monkeypatch) -> None:
+def test_verify_connection_accepts_plane_from_any_initial_mode(monkeypatch) -> None:
     module = load_tracking_module()
     connection = FakePlaneConnection(mode="MANUAL", armed=True)
     args = type(
@@ -420,6 +472,19 @@ def test_verify_connection_auto_switches_plane_to_fbwa(monkeypatch) -> None:
     result = module.verify_connection(connection, args)
 
     assert result == (1, 1, "plane")
+    assert connection.mode_set is None
+
+
+def test_request_plane_fbwa_changes_mode_once_and_waits_for_confirmation(monkeypatch) -> None:
+    module = load_tracking_module()
+    connection = FakePlaneConnection(mode="MANUAL", armed=True)
+    monkeypatch.setattr(
+        module.mavutil,
+        "mode_string_v10",
+        lambda message: getattr(message, "mode_name", "FBWA"),
+    )
+
+    assert module.request_plane_fbwa(connection, "MANUAL", timeout_s=0.5) is True
     assert connection.mode_set == 5
 
 
@@ -445,7 +510,7 @@ def test_surface_test_allows_unarmed_plane_startup(monkeypatch) -> None:
     result = module.verify_connection(connection, args)
 
     assert result == (1, 1, "plane")
-    assert connection.mode_set == 5
+    assert connection.mode_set is None
 
 
 def test_apply_deadband_zeroes_small_image_error() -> None:
@@ -565,6 +630,29 @@ def test_plane_response_model_uses_aircraft_limits_and_time_constant(monkeypatch
     assert model.pitch_channel == 2
     assert model.throttle_channel == 1
     assert model.yaw_channel == 3
+
+
+def test_plane_response_model_uses_mapped_channel_calibration_and_reversal(monkeypatch) -> None:
+    module = load_tracking_module()
+    monkeypatch.setattr(sys, "argv", ["sitl_track_target.py", "--enable-guidance"])
+    args = module.parse_args()
+
+    model = module.plane_response_model_from_params(
+        args,
+        {
+            "RCMAP_ROLL": 5.0,
+            "RC5_MIN": 982.0,
+            "RC5_TRIM": 1493.0,
+            "RC5_MAX": 2018.0,
+            "RC5_REVERSED": 1.0,
+        },
+    )
+
+    assert model.roll_channel == 5
+    assert model.rc_calibration.roll.minimum == 982
+    assert model.rc_calibration.roll.trim == 1493
+    assert model.rc_calibration.roll.maximum == 2018
+    assert model.rc_calibration.roll.reversed is True
 
 
 def test_plane_response_model_keeps_explicit_fixed_throttle(monkeypatch) -> None:

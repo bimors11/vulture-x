@@ -98,7 +98,7 @@ at the right/bottom edge.
 
 Machine-readable tracking failure reasons used by the SITL/UI helper path
 include `missing_custom_selection_file`, `target_lost`, `stale_video`,
-`mavlink_heartbeat_timeout`, `vehicle_disarmed`, `flight_mode_changed`,
-`below_tracking_altitude`, and `low_airspeed`. The unresolved safety constraint
-remains unchanged: image size and template lock do not prove physical range or
-separation.
+`mavlink_heartbeat_timeout`, `vehicle_disarmed`, `pilot_mode_change`,
+`altitude_unknown`, `below_tracking_altitude`, `airspeed_unknown`, and
+`low_airspeed`. The unresolved safety constraint remains unchanged: image size
+and template lock do not prove physical range or separation.

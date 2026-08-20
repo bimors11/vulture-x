@@ -35,12 +35,13 @@ STABLE_FRAME_MIN_AGE_S = 0.02
 PLANE_TARGET_AIRSPEED_MPS = 20.0
 PLANE_CRUISE_THROTTLE = 0.55
 DEFAULT_MAX_FRAME_AGE_MS = 750.0
-DEFAULT_MAVLINK_HEARTBEAT_TIMEOUT_S = 0.0
+DEFAULT_MAVLINK_HEARTBEAT_TIMEOUT_S = 3.0
 DEFAULT_MIN_TRACKING_ALT_M = 15.0
 DEFAULT_PLANE_PROXIMITY_FAR_SIZE = 0.025
 DEFAULT_PLANE_PROXIMITY_NEAR_SIZE = 0.16
 MAX_GUIDED_IMAGE_ERROR = 1.0
 MIN_PLANE_COMMAND_FILTER_ALPHA = 0.18
+PLANE_FBWA_TRANSITION_TIMEOUT_S = 3.0
 PLANE_RESPONSE_PARAM_NAMES = (
     "ROLL_LIMIT_DEG",
     "PTCH_LIM_MAX_DEG",
@@ -72,6 +73,7 @@ PLANE_RESPONSE_PARAM_NAMES = (
     "MAV_OPTIONS",
     "RC_OPTIONS",
     "RC_OVERRIDE_TIME",
+    "MIS_RESTART",
     *(f"RC{channel}_{suffix}" for channel in range(1, 9) for suffix in ("MIN", "TRIM", "MAX")),
     "RC1_REVERSED",
     "RC2_REVERSED",
@@ -388,10 +390,7 @@ def parse_args() -> argparse.Namespace:
         "--mavlink-heartbeat-timeout-s",
         type=float,
         default=DEFAULT_MAVLINK_HEARTBEAT_TIMEOUT_S,
-        help=(
-            "Deprecated and ignored. Tracking stops only on manual stop or "
-            "configured target-loss logic."
-        ),
+        help="Maximum age of MAVLink heartbeat during active tracking.",
     )
     parser.add_argument(
         "--simulator-mode",
@@ -532,7 +531,7 @@ def parse_args() -> argparse.Namespace:
     )
     args = parser.parse_args()
     args.timeout_s = 0.0
-    args.mavlink_heartbeat_timeout_s = 0.0
+    args.mavlink_heartbeat_timeout_s = max(0.0, float(args.mavlink_heartbeat_timeout_s))
     return args
 
 
@@ -1009,19 +1008,7 @@ def verify_connection(
 
     mode = mavutil.mode_string_v10(heartbeat)
     armed = bool(heartbeat.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
-    if vehicle == "plane":
-        if mode != "FBWA":
-            fbwa_mode = connection.mode_mapping().get("FBWA")
-            if fbwa_mode is None:
-                raise RuntimeError("fbwa_mode_unavailable")
-            print(
-                f"sitl_tracking_status=setting_mode vehicle=plane from={mode} to=FBWA",
-                flush=True,
-            )
-            connection.set_mode(fbwa_mode)
-            if not wait_mode(connection, "FBWA", timeout_s):
-                raise RuntimeError("fbwa_mode_timeout")
-    elif mode != "GUIDED":
+    if vehicle != "plane" and mode != "GUIDED":
         raise RuntimeError(f"vehicle must already be in GUIDED mode, got {mode}")
     if not armed and not args.surface_test:
         raise RuntimeError("vehicle must already be armed; this script will not arm")
@@ -1042,10 +1029,6 @@ def send_client_heartbeat(connection: mavutil.mavfile) -> None:
 def heartbeat_status(message: object) -> tuple[bool, str]:
     armed = bool(message.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
     return armed, mavutil.mode_string_v10(message)
-
-
-def should_reassert_plane_mode(mode_name: str) -> bool:
-    return mode_name == "RTL"
 
 
 def poll_heartbeat(
@@ -1090,10 +1073,47 @@ def safe_release_override(connection: mavutil.mavfile, active: bool, reason: str
     return False
 
 
+def request_plane_fbwa(
+    connection: mavutil.mavfile,
+    current_mode: str | None,
+    timeout_s: float = PLANE_FBWA_TRANSITION_TIMEOUT_S,
+) -> bool:
+    if current_mode == "FBWA":
+        print("tracking_state=REQUESTING_FBWA status=already_confirmed", flush=True)
+        return True
+    fbwa_mode = connection.mode_mapping().get("FBWA")
+    if fbwa_mode is None:
+        print("tracking_state=FAILED reason=fbwa_mode_unavailable", flush=True)
+        return False
+    print(
+        f"tracking_state=REQUESTING_FBWA from={current_mode if current_mode else 'unknown'}",
+        flush=True,
+    )
+    connection.set_mode(fbwa_mode)
+    if wait_mode(connection, "FBWA", timeout_s):
+        print("tracking_state=TRACKING mode=FBWA", flush=True)
+        return True
+    print("tracking_state=FAILED reason=fbwa_transition_timeout", flush=True)
+    return False
+
+
 def validate_rc_override_acceptance(
     values: dict[str, float],
     source_system: int,
 ) -> str | None:
+    rc_options = round(values.get("RC_OPTIONS", 0.0))
+    if rc_options & 0b10:
+        return "rc_override_disabled"
+
+    rc_override_timeout_s = values.get("RC_OVERRIDE_TIME")
+    if rc_override_timeout_s is not None and rc_override_timeout_s <= 0:
+        return "rc_override_disabled"
+
+    mav_options = round(values.get("MAV_OPTIONS", 0.0))
+    sysid_enforced = bool(mav_options & 0b1)
+    if not sysid_enforced:
+        return None
+
     gcs_low = values.get("MAV_GCS_SYSID")
     gcs_high = values.get("MAV_GCS_SYSID_HI")
     if gcs_low is not None and gcs_high is not None:
@@ -1152,7 +1172,7 @@ def rc_override(connection: mavutil.mavfile, channels: dict[int, int]) -> None:
     for channel, pwm in channels.items():
         if channel < 1 or channel > 8:
             raise ValueError(f"RC override channel out of range: {channel}")
-        values[channel - 1] = round(clamp(pwm, 1000, 2000))
+        values[channel - 1] = round(clamp(pwm, 800, 2200))
     connection.mav.rc_channels_override_send(
         connection.target_system,
         connection.target_component,
@@ -1173,12 +1193,11 @@ def attitude_to_plane_rc_pwm(
 ) -> tuple[int, int, int, int]:
     roll_fraction = clamp(roll_deg / max(0.1, max_roll_deg), -1.0, 1.0)
     pitch_fraction = clamp(pitch_deg / max(0.1, max_pitch_deg), -1.0, 1.0)
-    if roll_rc_reversed:
-        roll_fraction = -roll_fraction
-    if pitch_rc_reversed:
-        pitch_fraction = -pitch_fraction
     throttle_fraction = clamp(throttle, 0.0, 1.0)
-    calibration = calibration or RcCalibrationSet()
+    calibration = calibration or RcCalibrationSet(
+        roll=RcCalibration(reversed=roll_rc_reversed),
+        pitch=RcCalibration(reversed=pitch_rc_reversed),
+    )
     return (
         pwm_from_centered_fraction(roll_fraction, calibration.roll),
         pwm_from_centered_fraction(pitch_fraction, calibration.pitch),
@@ -1684,9 +1703,9 @@ def format_servo_functions(values: dict[str, float]) -> str:
 def read_plane_telemetry(
     connection: mavutil.mavfile,
     last_heading_deg: float,
-    last_relative_alt_m: float,
+    last_relative_alt_m: float | None,
     last_airspeed_mps: float | None,
-) -> tuple[float, float, float | None]:
+) -> tuple[float, float | None, float | None]:
     deadline = time.monotonic() + 0.03
     heading_deg = last_heading_deg
     relative_alt_m = last_relative_alt_m
@@ -1848,12 +1867,15 @@ def main() -> int:
     last_command = time.monotonic()
     last_valid_frame_monotonic = time.monotonic()
     last_heartbeat_timestamp_s = time.time()
+    last_heartbeat_monotonic = time.monotonic()
     last_gcs_heartbeat_monotonic = time.monotonic()
     control_authority_active = False
+    plane_tracking_started = vehicle != "plane"
+    current_mode: str | None = None
     low_airspeed_since: float | None = None
     last_detection_time: float | None = None
     plane_heading_deg = 0.0
-    plane_relative_alt_m = 50.0
+    plane_relative_alt_m: float | None = None
     plane_airspeed_mps: float | None = None
     previous_error_x: float | None = None
     previous_error_y: float | None = None
@@ -1891,6 +1913,14 @@ def main() -> int:
                 return 1
             if "RC_OVERRIDE_TIME" not in param_values:
                 print("tracking_warning=rc_override_timeout_unknown", flush=True)
+            elif param_values["RC_OVERRIDE_TIME"] > 2.0:
+                rc_timeout_s = param_values["RC_OVERRIDE_TIME"]
+                print(
+                    f"tracking_warning=rc_override_timeout_high value_s={rc_timeout_s:.2f}",
+                    flush=True,
+                )
+            if round(param_values.get("MIS_RESTART", 0.0)) != 0:
+                print("tracking_warning=mission_restart_enabled", flush=True)
             plane_response_model = plane_response_model_from_params(plane_tuning, param_values)
             param_status = "cached" if param_source == "cache" else "read"
             print(
@@ -1939,22 +1969,6 @@ def main() -> int:
         else:
             throttle_report = surface_test_throttle
         airspeed_report = plane_airspeed_mps
-        send_plane_rc_attitude(
-            connection,
-            0.0,
-            0.0,
-            plane_response_model.max_roll_deg,
-            max(plane_response_model.max_pitch_up_deg, plane_response_model.max_pitch_down_deg),
-            throttle_report,
-            plane_response_model.pitch_rc_reversed,
-            plane_response_model.roll_channel,
-            plane_response_model.pitch_channel,
-            plane_response_model.throttle_channel,
-            plane_response_model.yaw_channel,
-            plane_response_model.roll_rc_reversed,
-            plane_response_model.rc_calibration,
-        )
-        control_authority_active = True
         roll_pwm_report, pitch_pwm_report, throttle_pwm_report, _yaw_pwm = (
             attitude_to_plane_rc_pwm(
                 0.0,
@@ -1982,6 +1996,7 @@ def main() -> int:
                 last_heartbeat_timestamp_s,
             )
             if heartbeat is not None:
+                last_heartbeat_monotonic = now
                 armed, current_mode = heartbeat_status(heartbeat)
                 if vehicle == "plane":
                     if not armed and not args.surface_test:
@@ -1991,23 +2006,25 @@ def main() -> int:
                             "vehicle_disarmed",
                         )
                         return tracking_failsafe("vehicle_disarmed")
-                    if current_mode == "RTL":
-                        fbwa_mode = connection.mode_mapping().get("FBWA")
-                        if fbwa_mode is not None:
-                            print(
-                                "sitl_tracking_status=reasserting_mode "
-                                f"vehicle=plane from={current_mode} to=FBWA",
-                                flush=True,
-                            )
-                            connection.set_mode(fbwa_mode)
-                            continue
-                    if current_mode != "FBWA":
+                    if plane_tracking_started and current_mode != "FBWA":
                         control_authority_active = safe_release_override(
                             connection,
                             control_authority_active,
-                            "flight_mode_changed",
+                            "pilot_mode_change",
                         )
-                        return tracking_failsafe("flight_mode_changed", mode=current_mode)
+                        return tracking_failsafe("pilot_mode_change", mode=current_mode)
+            if (
+                vehicle == "plane"
+                and plane_tracking_started
+                and args.mavlink_heartbeat_timeout_s > 0
+                and now - last_heartbeat_monotonic > args.mavlink_heartbeat_timeout_s
+            ):
+                control_authority_active = safe_release_override(
+                    connection,
+                    control_authority_active,
+                    "mavlink_heartbeat_timeout",
+                )
+                return tracking_failsafe("mavlink_heartbeat_timeout")
             if vehicle == "plane":
                 tuning_file_state, plane_tuning = update_tuning_from_file(
                     tuning_file_state,
@@ -2067,6 +2084,31 @@ def main() -> int:
                     previous_error_x = None
                     previous_error_y = None
                     previous_error_time = None
+                    if not plane_tracking_started:
+                        write_demand_state(
+                            args.demand_state_file,
+                            {
+                                "detected": False,
+                                "mode": tracking_mode,
+                                "vehicle": vehicle,
+                                "tracking_state": "WAIT_TARGET",
+                                "control_authority": False,
+                                "tracking_tuning_revision": plane_tuning.revision,
+                                "failsafe": False,
+                            },
+                        )
+                        if now - last_report >= 1.0:
+                            frame_age_ms = frame_age_s * 1000.0 if frame_age_s is not None else -1.0
+                            print(
+                                f"sitl_tracking_status=searching mode={tracking_mode} "
+                                "reason=target_not_detected "
+                                "loss_behavior=waiting_for_target "
+                                f"frame_age_ms={frame_age_ms:.0f}",
+                                flush=True,
+                            )
+                            last_report = now
+                        time.sleep(period_s)
+                        continue
                     plane_heading_deg, plane_relative_alt_m, plane_airspeed_mps = (
                         read_plane_telemetry(
                             connection,
@@ -2330,6 +2372,44 @@ def main() -> int:
                         plane_relative_alt_m,
                         plane_airspeed_mps,
                     )
+                if not plane_tracking_started:
+                    if (
+                        args.mavlink_heartbeat_timeout_s > 0
+                        and now - last_heartbeat_monotonic > args.mavlink_heartbeat_timeout_s
+                    ):
+                        return tracking_failsafe("mavlink_heartbeat_timeout")
+                    if frame_age_s is not None and frame_age_s * 1000.0 > max(
+                        100.0,
+                        float(args.max_frame_age_ms),
+                    ):
+                        return tracking_failsafe(
+                            "stale_video",
+                            frame_age_ms=f"{frame_age_s * 1000.0:.0f}",
+                        )
+                    if not args.surface_test and plane_relative_alt_m is None:
+                        print("tracking_start=blocked reason=altitude_unknown", flush=True)
+                        return tracking_failsafe("altitude_unknown")
+                    if (
+                        not args.surface_test
+                        and plane_response_model.min_airspeed_mps is not None
+                        and plane_airspeed_mps is None
+                    ):
+                        print("tracking_start=blocked reason=airspeed_unknown", flush=True)
+                        return tracking_failsafe("airspeed_unknown")
+                    if not request_plane_fbwa(connection, current_mode):
+                        return tracking_failsafe("fbwa_transition_timeout")
+                    plane_tracking_started = True
+                    last_heartbeat_monotonic = now
+                    current_mode = "FBWA"
+                    control_authority_active = False
+                if not args.surface_test and plane_relative_alt_m is None:
+                    control_authority_active = safe_release_override(
+                        connection,
+                        control_authority_active,
+                        "altitude_unknown",
+                    )
+                    return tracking_failsafe("altitude_unknown")
+                if not args.surface_test:
                     if plane_relative_alt_m < plane_tuning.min_tracking_alt_m:
                         control_authority_active = safe_release_override(
                             connection,

@@ -227,7 +227,7 @@ def test_app_state_configures_plane_commands(tmp_path: Path, monkeypatch) -> Non
             plane_pitch_gain_scale=1.10,
             plane_pitch_near_gain_scale=1.45,
             plane_pitch_below_center_boost=0.25,
-            plane_pitch_filter_alpha=0.25,
+            plane_pitch_filter_alpha=0.45,
             plane_max_pitch_step_deg=2.0,
             plane_max_roll_step_deg=3.0,
             plane_loss_hold_s=1.5,
@@ -288,7 +288,7 @@ def test_app_state_configures_plane_commands(tmp_path: Path, monkeypatch) -> Non
     )
     assert (
         state.steering.command[state.steering.command.index("--plane-pitch-filter-alpha") + 1]
-        == "0.25"
+        == "0.45"
     )
     assert (
         state.steering.command[state.steering.command.index("--plane-max-pitch-step-deg") + 1]
@@ -340,7 +340,7 @@ def test_app_state_configures_plane_surface_test_command(
             plane_pitch_gain_scale=1.10,
             plane_pitch_near_gain_scale=1.45,
             plane_pitch_below_center_boost=0.25,
-            plane_pitch_filter_alpha=0.25,
+            plane_pitch_filter_alpha=0.45,
             plane_max_pitch_step_deg=2.0,
             plane_max_roll_step_deg=3.0,
             plane_loss_hold_s=1.5,
@@ -399,7 +399,7 @@ def test_simulator_plane_ground_test_uses_zero_throttle(
             plane_pitch_gain_scale=1.10,
             plane_pitch_near_gain_scale=1.45,
             plane_pitch_below_center_boost=0.25,
-            plane_pitch_filter_alpha=0.25,
+            plane_pitch_filter_alpha=0.45,
             plane_max_pitch_step_deg=2.0,
             plane_max_roll_step_deg=3.0,
             plane_loss_hold_s=1.5,
@@ -453,7 +453,7 @@ def test_simulator_plane_tracking_uses_eighty_percent_throttle(
             plane_pitch_gain_scale=1.10,
             plane_pitch_near_gain_scale=1.45,
             plane_pitch_below_center_boost=0.25,
-            plane_pitch_filter_alpha=0.25,
+            plane_pitch_filter_alpha=0.45,
             plane_max_pitch_step_deg=2.0,
             plane_max_roll_step_deg=3.0,
             plane_loss_hold_s=1.5,
@@ -501,7 +501,7 @@ def test_app_state_surface_test_tracks_red_without_manual_selection(
             plane_pitch_gain_scale=1.10,
             plane_pitch_near_gain_scale=1.45,
             plane_pitch_below_center_boost=0.25,
-            plane_pitch_filter_alpha=0.25,
+            plane_pitch_filter_alpha=0.45,
             plane_max_pitch_step_deg=2.0,
             plane_max_roll_step_deg=3.0,
             plane_loss_hold_s=1.5,
@@ -552,7 +552,7 @@ def test_app_state_surface_test_tracks_selected_head(
             plane_pitch_gain_scale=1.10,
             plane_pitch_near_gain_scale=1.45,
             plane_pitch_below_center_boost=0.25,
-            plane_pitch_filter_alpha=0.25,
+            plane_pitch_filter_alpha=0.45,
             plane_max_pitch_step_deg=2.0,
             plane_max_roll_step_deg=3.0,
             plane_loss_hold_s=1.5,
@@ -766,7 +766,7 @@ def test_app_state_configures_quad_commands_without_plane_parameters(
             plane_pitch_gain_scale=1.10,
             plane_pitch_near_gain_scale=1.45,
             plane_pitch_below_center_boost=0.25,
-            plane_pitch_filter_alpha=0.25,
+            plane_pitch_filter_alpha=0.45,
             plane_max_pitch_step_deg=2.0,
             plane_max_roll_step_deg=3.0,
             plane_loss_hold_s=1.5,

@@ -986,7 +986,7 @@ HTML = r"""<!doctype html>
           '&plane_pitch_gain_scale=' + tuningValue('plane_pitch_gain_scale', '1.20') +
           '&plane_pitch_near_gain_scale=' + tuningValue('plane_pitch_near_gain_scale', '1.60') +
           '&plane_pitch_below_center_boost=' + tuningValue('plane_pitch_below_center_boost', '0.25') +
-          '&plane_pitch_filter_alpha=' + tuningValue('plane_pitch_filter_alpha', '0.25') +
+          '&plane_pitch_filter_alpha=' + tuningValue('plane_pitch_filter_alpha', '0.45') +
           '&plane_max_pitch_step_deg=' + tuningValue('plane_max_pitch_step_deg', '2.0') +
           '&plane_max_roll_step_deg=' + tuningValue('plane_max_roll_step_deg', '6.0') +
           '&plane_loss_hold_s=' + tuningValue('plane_loss_hold_s', '1.5');
@@ -2816,7 +2816,7 @@ class Handler(BaseHTTPRequestHandler):
                     query.get("plane_pitch_below_center_boost", ["0.25"])[0]
                 )
                 plane_pitch_filter_alpha = float(
-                    query.get("plane_pitch_filter_alpha", ["0.25"])[0]
+                    query.get("plane_pitch_filter_alpha", ["0.45"])[0]
                 )
                 plane_max_pitch_step_deg = float(
                     query.get("plane_max_pitch_step_deg", ["2.0"])[0]
