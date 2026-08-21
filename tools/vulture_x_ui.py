@@ -25,6 +25,7 @@ from typing import Any, NamedTuple
 from urllib.parse import parse_qs, urlparse
 
 import cv2
+import sitl_track_target as stt
 from mavlink_endpoint import open_mavlink_connection, parse_mavlink_endpoint
 from pymavlink import mavutil
 from track_camera_target import (
@@ -34,6 +35,17 @@ from track_camera_target import (
     newest_image,
 )
 
+from vulture_x.runtime import TrackingRuntime
+from vulture_x.runtime.capture import (
+    FileFrameSource,
+    GstAppSinkFrameSource,
+    appsink_pipeline_from_rtsp,
+    appsink_pipeline_from_udp_h264,
+)
+from vulture_x.runtime.mavlink import MavlinkTelemetryReceiver
+from vulture_x.runtime.preview import encode_runtime_preview_jpeg
+from vulture_x.runtime.state import RuntimeSnapshot, TrackingSnapshot, VideoFrame
+from vulture_x.runtime.workers import ControlInputs
 from vulture_x.vision.tracker import (
     TemplateMatchingTracker,
     clamp_bbox,
@@ -96,6 +108,7 @@ DEFAULT_FIXED_WING_LOSS_HOLD_S = 1.5
 DEFAULT_SIM_TRACKING_THROTTLE = 0.80
 DEFAULT_GROUND_TEST_THROTTLE = 0.0
 DEFAULT_MAX_FRAME_AGE_MS = 750.0
+DEFAULT_MAVLINK_TIMEOUT_MS = 3000.0
 CAMERA_STREAM_ENABLE_RETRY_S = (0.0, 1.0, 2.5, 5.0, 8.0)
 CAMERA_START_WAIT_S = 5.0
 HEAD_DETECTION_CACHE: dict[str, object] = {"key": None, "heads": []}
@@ -1453,6 +1466,611 @@ class UiSelectionTracker:
         return self._last_bbox
 
 
+class RuntimeSteeringSession:
+    """In-process fixed-wing runtime adapter used by WebUI START TRACKING."""
+
+    def __init__(
+        self,
+        *,
+        mavlink_endpoint: str,
+        video_source: str,
+        rtsp_url: str,
+        camera_dir: Path | None,
+        tracking_mode: str,
+        rate_hz: float,
+        surface_test: bool,
+        tuning_values: dict[str, object],
+        simulator_mode: bool,
+    ) -> None:
+        self.mavlink_endpoint = mavlink_endpoint
+        self.video_source = video_source
+        self.rtsp_url = rtsp_url
+        self.camera_dir = camera_dir
+        self.tracking_mode = "red" if tracking_mode == "orange" else tracking_mode
+        self.rate_hz = rate_hz
+        self.surface_test = surface_test
+        self.simulator_mode = simulator_mode
+        self.connection: mavutil.mavfile | None = None
+        self.runtime: TrackingRuntime | None = None
+        self.running = False
+        self.abort_reason: str | None = None
+        self.control_authority_active = False
+        self.plane_tracking_started = False
+        self.current_mode: str | None = None
+        self.last_detection_ns: int | None = None
+        self.previous_error_x: float | None = None
+        self.previous_error_y: float | None = None
+        self.previous_error_time_ns: int | None = None
+        self.previous_roll_command_deg: float | None = 0.0
+        self.previous_pitch_command_deg: float | None = 0.0
+        self.low_airspeed_since_ns: int | None = None
+        self.last_command_ns: int | None = None
+        self.tracking_sequence = 0
+        self.tuning = stt.clamp_plane_tuning(
+            stt.PlaneTrackingTuning(
+                revision=int(tuning_values.get("revision", 0)),
+                vertical_gain=float(tuning_values["vertical_gain"]),
+                plane_centering_gain=float(tuning_values["plane_centering_gain"]),
+                plane_near_centering_gain=float(tuning_values["plane_near_centering_gain"]),
+                plane_roll_gain_scale=float(tuning_values["plane_roll_gain_scale"]),
+                plane_pitch_gain_scale=float(tuning_values["plane_pitch_gain_scale"]),
+                plane_pitch_near_gain_scale=float(tuning_values["plane_pitch_near_gain_scale"]),
+                plane_error_deadband=float(tuning_values.get("plane_error_deadband", 0.015)),
+                plane_lead_s=float(tuning_values.get("plane_lead_s", 0.0)),
+                plane_damping_gain=float(tuning_values["plane_damping_gain"]),
+                plane_near_damping_gain=float(tuning_values["plane_near_damping_gain"]),
+                plane_pitch_filter_alpha=float(tuning_values["plane_pitch_filter_alpha"]),
+                plane_max_pitch_step_deg=float(tuning_values["plane_max_pitch_step_deg"]),
+                plane_max_roll_step_deg=float(tuning_values["plane_max_roll_step_deg"]),
+                max_plane_roll_deg=float(tuning_values["max_plane_roll_deg"]),
+                max_plane_pitch_deg=float(tuning_values["max_plane_pitch_deg"]),
+                plane_near_pitch_down_limit_deg=float(
+                    tuning_values.get("plane_near_pitch_down_limit_deg", 40.0)
+                ),
+                plane_far_control_scale=float(tuning_values["plane_far_control_scale"]),
+                plane_near_control_scale=float(tuning_values.get("plane_near_control_scale", 1.0)),
+                plane_camera_hfov_deg=float(tuning_values.get("plane_camera_hfov_deg", 70.0)),
+                plane_proximity_far_size=float(
+                    tuning_values.get("plane_proximity_far_size", 0.025)
+                ),
+                plane_proximity_near_size=float(
+                    tuning_values.get("plane_proximity_near_size", 0.16)
+                ),
+                plane_airspeed_mps=float(tuning_values["plane_airspeed_mps"]),
+                plane_throttle=float(tuning_values["plane_throttle"]),
+                plane_throttle_airspeed_gain=float(
+                    tuning_values.get("plane_throttle_airspeed_gain", 0.04)
+                ),
+                plane_min_throttle=float(tuning_values["plane_min_throttle"]),
+                plane_max_throttle=float(tuning_values["plane_max_throttle"]),
+                plane_near_throttle_reduction=float(
+                    tuning_values.get("plane_near_throttle_reduction", 0.0)
+                ),
+                plane_pitch_below_center_boost=float(
+                    tuning_values["plane_pitch_below_center_boost"]
+                ),
+                plane_loss_hold_s=float(tuning_values["plane_loss_hold_s"]),
+                min_tracking_alt_m=float(tuning_values.get("min_tracking_alt_m", 15.0)),
+                airspeed_low_persistence_s=float(
+                    tuning_values.get("airspeed_low_persistence_s", 2.0)
+                ),
+            )
+        )
+        self.response_model = stt.plane_response_model_from_params(self.tuning, {})
+        self.tracker: object | None = None
+        self.tracker_engine_name = "unknown"
+
+    def start(self) -> str:
+        if self.running:
+            return "runtime steering already running"
+        self.connection = open_mavlink_connection(
+            self.mavlink_endpoint,
+            source_system=255,
+            source_component=194,
+            autoreconnect=False,
+        )
+        args = self._verification_args()
+        target_system, target_component, vehicle = stt.verify_connection(self.connection, args)
+        if vehicle != "plane":
+            self.close()
+            return "runtime steering blocked reason=plane_required"
+        param_values = stt.load_plane_param_cache(PLANE_PARAM_CACHE_PATH, self.mavlink_endpoint)
+        if param_values is None:
+            param_values = stt.read_plane_parameters(
+                self.connection,
+                target_system,
+                target_component,
+                timeout_per_param_s=0.12,
+            )
+            stt.save_plane_param_cache(PLANE_PARAM_CACHE_PATH, self.mavlink_endpoint, param_values)
+        block_reason = stt.validate_rc_override_acceptance(param_values, 255)
+        if block_reason is not None:
+            self.close()
+            return f"runtime steering blocked reason={block_reason}"
+        self.response_model = stt.plane_response_model_from_params(self.tuning, param_values)
+        self.tracker = self._create_tracker()
+        source = self._create_frame_source()
+        receiver = MavlinkTelemetryReceiver(self.connection)
+        self.runtime = TrackingRuntime(
+            source,
+            self._process_frame,
+            receiver.receive,
+            self._control_step,
+            control_rate_hz=30.0,
+        )
+        self.runtime.start()
+        self.running = True
+        return "runtime steering started"
+
+    def stop(self, *, request_auto: bool) -> str:
+        self._release_override("normal_stop")
+        if self.runtime is not None:
+            self.runtime.stop()
+        if self.connection is not None and request_auto:
+            # Existing WebUI semantics request AUTO on normal stop for simulator plane.
+            auto_mode = self.connection.mode_mapping().get("AUTO")
+            if auto_mode is not None:
+                with contextlib.suppress(Exception):
+                    self.connection.set_mode(auto_mode)
+        self.close()
+        return "runtime steering stopped"
+
+    def close(self) -> None:
+        if self.connection is not None:
+            with contextlib.suppress(Exception):
+                self.connection.close()
+        self.connection = None
+        self.runtime = None
+        self.running = False
+
+    def snapshot(self) -> RuntimeSnapshot | None:
+        return self.runtime.snapshot() if self.runtime is not None else None
+
+    def _verification_args(self) -> argparse.Namespace:
+        return argparse.Namespace(
+            timeout_s=20.0,
+            vehicle="plane",
+            surface_test=self.surface_test,
+        )
+
+    def _create_frame_source(self) -> object:
+        backend = os.environ.get("VULTURE_X_RUNTIME_CAPTURE_BACKEND", "appsink")
+        if backend == "file":
+            if self.camera_dir is None:
+                raise RuntimeError("runtime_file_capture_missing_camera_dir")
+            return FileFrameSource(self.camera_dir)
+        try:
+            if self.video_source == "rtsp":
+                return GstAppSinkFrameSource(
+                    appsink_pipeline_from_rtsp(
+                        self.rtsp_url,
+                        latency_ms=int(DEFAULT_RTSP_LATENCY_MS),
+                        protocols=DEFAULT_RTSP_PROTOCOLS,
+                        max_rate=int(DEFAULT_RTSP_MAX_RATE),
+                    )
+                )
+            return GstAppSinkFrameSource(appsink_pipeline_from_udp_h264())
+        except Exception:
+            if self.camera_dir is None:
+                raise
+            return FileFrameSource(self.camera_dir, source_name="file-fallback")
+
+    def _create_tracker(self) -> object:
+        tracker_name = (
+            f"NANO:{DEFAULT_NANO_BACKBONE}:{DEFAULT_NANO_NECKHEAD}"
+            if self.tracking_mode in {"custom", "head", "person"}
+            else "TEMPLATE"
+        )
+        self.tracker_engine_name = "NanoTrack" if tracker_name.startswith("NANO:") else "TEMPLATE"
+        if self.tracking_mode in {"custom", "head", "person"}:
+            return stt.CustomSelectionTracker(tracker_name, SELECTION_PATH)
+        detector = detect_banner_target if self.tracking_mode == "banner" else detect_colored_target
+        return stt.DetectorBackedTracker("TEMPLATE", 25.0, detector)
+
+    def _process_frame(self, frame: VideoFrame) -> TrackingSnapshot:
+        self.tracking_sequence += 1
+        bbox = None if self.tracker is None else self.tracker.bbox(frame.image)
+        confidence = stt.tracker_confidence(self.tracker)
+        if confidence is None:
+            confidence = stt.tracker_last_confidence(
+                self.tracker if self.tracking_mode in {"custom", "head", "person"} else None,
+                self.tracker if self.tracking_mode not in {"custom", "head", "person"} else None,
+            )
+        if bbox is None:
+            return TrackingSnapshot(
+                sequence=self.tracking_sequence,
+                frame_sequence=frame.sequence,
+                timestamp_ns=time.monotonic_ns(),
+                detected=False,
+                confidence=confidence,
+                mode=self.tracking_mode,
+                vision_state="LOST" if self.plane_tracking_started else "ACQUIRE",
+            )
+        x, y, width, height = bbox
+        frame_height, frame_width = frame.image.shape[:2]
+        center_x = (x + width / 2.0) / frame_width
+        center_y = (y + height / 2.0) / frame_height
+        error_x = center_x - 0.5
+        error_y = center_y - 0.5
+        aspect_ratio = frame_width / frame_height
+        vertical_fov_deg = math.degrees(
+            2.0
+            * math.atan(
+                math.tan(math.radians(self.tuning.plane_camera_hfov_deg) * 0.5) / aspect_ratio
+            )
+        )
+        guided_error_x = stt.apply_deadband(
+            stt.perspective_correct_error(error_x, self.tuning.plane_camera_hfov_deg),
+            self.tuning.plane_error_deadband,
+        )
+        guided_error_y = stt.apply_deadband(
+            stt.perspective_correct_error(error_y, vertical_fov_deg),
+            self.tuning.plane_error_deadband,
+        )
+        proximity = stt.target_proximity_from_bbox(
+            bbox,
+            frame_width,
+            frame_height,
+            far_size=self.tuning.plane_proximity_far_size,
+            near_size=self.tuning.plane_proximity_near_size,
+        )
+        return TrackingSnapshot(
+            sequence=self.tracking_sequence,
+            frame_sequence=frame.sequence,
+            timestamp_ns=time.monotonic_ns(),
+            detected=True,
+            bbox=bbox,
+            confidence=confidence,
+            center_x=center_x,
+            center_y=center_y,
+            horizontal_error=guided_error_x,
+            vertical_error=guided_error_y,
+            mode=self.tracking_mode,
+            vision_state="TRACK",
+            details={"target_proximity": proximity},
+        )
+
+    def _control_step(self, inputs: ControlInputs) -> None:
+        if self.abort_reason is not None or self.connection is None:
+            return
+        vehicle = inputs.vehicle
+        tracking = inputs.tracking
+        now_ns = inputs.now_ns
+        if self.plane_tracking_started:
+            if inputs.heartbeat_age_ms is None or inputs.heartbeat_age_ms > DEFAULT_MAVLINK_TIMEOUT_MS:
+                self._abort("mavlink_heartbeat_timeout")
+                return
+            if vehicle is not None:
+                if vehicle.armed is False and not self.surface_test:
+                    self._abort("vehicle_disarmed")
+                    return
+                if vehicle.mode is not None and vehicle.mode != "FBWA":
+                    self._abort("pilot_mode_change")
+                    return
+        if inputs.frame_age_ms is not None and inputs.frame_age_ms > DEFAULT_MAX_FRAME_AGE_MS:
+            self._abort("stale_video")
+            return
+        if tracking is None or not tracking.detected:
+            self._handle_missing_tracking(inputs)
+            return
+        self.last_detection_ns = now_ns
+        if not self._ensure_tracking_started(inputs):
+            return
+        self._send_tracking_command(inputs)
+
+    def _ensure_tracking_started(self, inputs: ControlInputs) -> bool:
+        if self.plane_tracking_started:
+            return True
+        vehicle = inputs.vehicle
+        if vehicle is None:
+            return False
+        if not self.surface_test and vehicle.armed is not True:
+            self._abort("vehicle_disarmed")
+            return False
+        if not self.surface_test and vehicle.relative_altitude_m is None:
+            self._abort("altitude_unknown")
+            return False
+        if (
+            not self.surface_test
+            and self.response_model.min_airspeed_mps is not None
+            and vehicle.airspeed_mps is None
+        ):
+            self._abort("airspeed_unknown")
+            return False
+        if self.connection is None or not stt.request_plane_fbwa(self.connection, vehicle.mode):
+            self._abort("fbwa_transition_timeout")
+            return False
+        self.plane_tracking_started = True
+        self.current_mode = "FBWA"
+        return True
+
+    def _handle_missing_tracking(self, inputs: ControlInputs) -> None:
+        if not self.plane_tracking_started:
+            self._write_demand(False, inputs)
+            return
+        age_s = (
+            float("inf")
+            if self.last_detection_ns is None
+            else (inputs.now_ns - self.last_detection_ns) / 1_000_000_000.0
+        )
+        if age_s > self.tuning.plane_loss_hold_s:
+            self._abort("target_lost")
+            return
+        self._send_hold_command(inputs)
+
+    def _send_tracking_command(self, inputs: ControlInputs) -> None:
+        tracking = inputs.tracking
+        vehicle = inputs.vehicle
+        if tracking is None or tracking.horizontal_error is None or tracking.vertical_error is None:
+            return
+        if vehicle is None:
+            return
+        if not self.surface_test:
+            if vehicle.relative_altitude_m is None:
+                self._abort("altitude_unknown")
+                return
+            if vehicle.relative_altitude_m < self.tuning.min_tracking_alt_m:
+                self._abort("below_tracking_altitude")
+                return
+            min_airspeed = self.response_model.min_airspeed_mps
+            if min_airspeed is not None and vehicle.airspeed_mps is not None:
+                if vehicle.airspeed_mps < min_airspeed:
+                    if self.low_airspeed_since_ns is None:
+                        self.low_airspeed_since_ns = inputs.now_ns
+                    elif (
+                        inputs.now_ns - self.low_airspeed_since_ns
+                        >= self.tuning.airspeed_low_persistence_s * 1_000_000_000
+                    ):
+                        self._abort("low_airspeed")
+                        return
+                else:
+                    self.low_airspeed_since_ns = None
+        proximity = float(tracking.details.get("target_proximity", 0.0))
+        guided_error_x = tracking.horizontal_error
+        guided_error_y = tracking.vertical_error
+        proportional_error_x = guided_error_x
+        proportional_error_y = guided_error_y
+        if self.previous_error_time_ns is not None and self.previous_error_x is not None and self.previous_error_y is not None:
+            dt_s = max(0.001, (inputs.now_ns - self.previous_error_time_ns) / 1_000_000_000.0)
+            damping_gain = stt.scheduled_gain(
+                self.tuning.plane_damping_gain,
+                self.tuning.plane_near_damping_gain,
+                proximity,
+            )
+            guided_error_x = stt.damped_axis_error(
+                proportional_error_x,
+                self.previous_error_x,
+                dt_s,
+                damping_gain,
+            )
+            guided_error_y = stt.damped_axis_error(
+                proportional_error_y,
+                self.previous_error_y,
+                dt_s,
+                damping_gain,
+            )
+        self.previous_error_x = proportional_error_x
+        self.previous_error_y = proportional_error_y
+        self.previous_error_time_ns = inputs.now_ns
+        control_scale = stt.far_target_control_scale(
+            proximity,
+            self.tuning.plane_far_control_scale,
+        ) * stt.near_target_control_scale(proximity, self.tuning.plane_near_control_scale)
+        centering_gain = stt.scheduled_gain(
+            self.tuning.plane_centering_gain,
+            self.tuning.plane_near_centering_gain,
+            proximity,
+        )
+        roll_deg = stt.clamp(
+            guided_error_x
+            * self.tuning.vertical_gain
+            * centering_gain
+            * self.tuning.plane_roll_gain_scale
+            * control_scale,
+            -self.response_model.max_roll_deg,
+            self.response_model.max_roll_deg,
+        )
+        roll_deg = stt.damp_pitch_command(
+            self.previous_roll_command_deg,
+            roll_deg,
+            self.response_model.pitch_filter_alpha,
+            self.tuning.plane_max_roll_step_deg,
+        )
+        pitch_deg = stt.plane_pitch_command(
+            guided_error_y,
+            self.tuning.vertical_gain * centering_gain * control_scale,
+            self.tuning.plane_pitch_gain_scale,
+            self.tuning.plane_pitch_near_gain_scale,
+            proximity,
+            self.tuning.plane_pitch_below_center_boost,
+            max(self.response_model.max_pitch_up_deg, self.response_model.max_pitch_down_deg),
+            self.tuning.plane_near_pitch_down_limit_deg,
+        )
+        pitch_deg = stt.clamp_plane_pitch(
+            pitch_deg,
+            self.response_model.max_pitch_up_deg,
+            self.response_model.max_pitch_down_deg,
+        )
+        pitch_deg = stt.damp_pitch_command(
+            self.previous_pitch_command_deg,
+            pitch_deg,
+            self.response_model.pitch_filter_alpha,
+            self.response_model.max_pitch_step_deg,
+        )
+        throttle = (
+            DEFAULT_GROUND_TEST_THROTTLE
+            if self.surface_test
+            else stt.plane_throttle_for_airspeed(
+                vehicle.airspeed_mps,
+                self.response_model.target_airspeed_mps,
+                self.response_model.cruise_throttle,
+                self.response_model.min_throttle,
+                self.response_model.max_throttle,
+                self.tuning.plane_throttle_airspeed_gain,
+                pitch_deg,
+                max(self.response_model.max_pitch_up_deg, self.response_model.max_pitch_down_deg),
+                proximity,
+                self.tuning.plane_near_throttle_reduction,
+            )
+        )
+        self._send_rc(roll_deg, pitch_deg, throttle, inputs, guided_error_x, guided_error_y)
+
+    def _send_hold_command(self, inputs: ControlInputs) -> None:
+        roll_deg = self.previous_roll_command_deg or 0.0
+        pitch_deg = self.previous_pitch_command_deg or 0.0
+        vehicle = inputs.vehicle
+        throttle = (
+            DEFAULT_GROUND_TEST_THROTTLE
+            if self.surface_test
+            else stt.plane_throttle_for_airspeed(
+                None if vehicle is None else vehicle.airspeed_mps,
+                self.response_model.target_airspeed_mps,
+                self.response_model.cruise_throttle,
+                self.response_model.min_throttle,
+                self.response_model.max_throttle,
+                self.tuning.plane_throttle_airspeed_gain,
+                pitch_deg,
+                max(self.response_model.max_pitch_up_deg, self.response_model.max_pitch_down_deg),
+            )
+        )
+        self._send_rc(roll_deg, pitch_deg, throttle, inputs, 0.0, 0.0, detected=False)
+
+    def _send_rc(
+        self,
+        roll_deg: float,
+        pitch_deg: float,
+        throttle: float,
+        inputs: ControlInputs,
+        guided_error_x: float,
+        guided_error_y: float,
+        *,
+        detected: bool = True,
+    ) -> None:
+        if self.connection is None:
+            return
+        tx_start_ns = time.monotonic_ns()
+        stt.send_plane_rc_attitude(
+            self.connection,
+            roll_deg,
+            pitch_deg,
+            self.response_model.max_roll_deg,
+            max(self.response_model.max_pitch_up_deg, self.response_model.max_pitch_down_deg),
+            throttle,
+            self.response_model.pitch_rc_reversed,
+            self.response_model.roll_channel,
+            self.response_model.pitch_channel,
+            self.response_model.throttle_channel,
+            self.response_model.yaw_channel,
+            self.response_model.roll_rc_reversed,
+            self.response_model.rc_calibration,
+        )
+        if self.runtime is not None:
+            self.runtime.metrics.observe("mavlink_tx_ms", (time.monotonic_ns() - tx_start_ns) / 1_000_000.0)
+            self.runtime.metrics.mark_rate("mavlink_tx", time.monotonic_ns())
+        self.control_authority_active = True
+        self.previous_roll_command_deg = roll_deg
+        self.previous_pitch_command_deg = pitch_deg
+        self.last_command_ns = inputs.now_ns
+        self._write_demand(
+            detected,
+            inputs,
+            roll_deg=roll_deg,
+            pitch_deg=pitch_deg,
+            throttle=throttle,
+            guided_error_x=guided_error_x,
+            guided_error_y=guided_error_y,
+        )
+
+    def _release_override(self, reason: str) -> None:
+        if self.connection is None or not self.control_authority_active:
+            self.control_authority_active = False
+            return
+        with contextlib.suppress(Exception):
+            stt.release_rc_override(self.connection)
+        self.control_authority_active = False
+        self._write_demand(False, None, failsafe=self.abort_reason is not None, reason=reason)
+
+    def _abort(self, reason: str) -> None:
+        self.abort_reason = reason
+        self._release_override(reason)
+
+    def _write_demand(
+        self,
+        detected: bool,
+        inputs: ControlInputs | None,
+        *,
+        roll_deg: float = 0.0,
+        pitch_deg: float = 0.0,
+        throttle: float = 0.0,
+        guided_error_x: float = 0.0,
+        guided_error_y: float = 0.0,
+        failsafe: bool = False,
+        reason: str | None = None,
+    ) -> None:
+        tracking = None if inputs is None else inputs.tracking
+        bbox = None if tracking is None else tracking.bbox
+        roll_pwm, pitch_pwm, throttle_pwm, _ = stt.attitude_to_plane_rc_pwm(
+            roll_deg,
+            pitch_deg,
+            self.response_model.max_roll_deg,
+            max(self.response_model.max_pitch_up_deg, self.response_model.max_pitch_down_deg),
+            throttle,
+            roll_rc_reversed=self.response_model.roll_rc_reversed,
+            pitch_rc_reversed=self.response_model.pitch_rc_reversed,
+            calibration=self.response_model.rc_calibration,
+        )
+        payload: dict[str, object] = {
+            "detected": detected,
+            "mode": self.tracking_mode,
+            "vehicle": "plane",
+            "bbox": list(bbox) if bbox is not None else None,
+            "center_x": None if tracking is None else tracking.center_x,
+            "center_y": None if tracking is None else tracking.center_y,
+            "guided_error_x": guided_error_x,
+            "guided_error_y": guided_error_y,
+            "roll_deg": roll_deg,
+            "pitch_deg": pitch_deg,
+            "roll_pwm": roll_pwm,
+            "pitch_pwm": pitch_pwm,
+            "throttle_pwm": throttle_pwm,
+            "max_roll_deg": self.response_model.max_roll_deg,
+            "max_pitch_deg": max(
+                self.response_model.max_pitch_up_deg,
+                self.response_model.max_pitch_down_deg,
+            ),
+            "rate_hz": self.rate_hz,
+            "frame_age_ms": None if inputs is None else inputs.frame_age_ms,
+            "tracking_result_age_ms": None if inputs is None else inputs.tracking_result_age_ms,
+            "command_age_ms": (
+                None
+                if inputs is None or self.last_command_ns is None
+                else (inputs.now_ns - self.last_command_ns) / 1_000_000.0
+            ),
+            "tracker_confidence": None if tracking is None else tracking.confidence,
+            "tracker_engine": self.tracker_engine_name,
+            "vision_state": "TRACK" if detected else "LOST",
+            "control_authority": "VULTURE-X" if self.control_authority_active else False,
+            "rc_override_active": self.control_authority_active,
+            "target_proximity": (
+                0.0 if tracking is None else float(tracking.details.get("target_proximity", 0.0))
+            ),
+            "throttle": throttle,
+            "airspeed_mps": None if inputs is None or inputs.vehicle is None else inputs.vehicle.airspeed_mps,
+            "effective_max_roll_deg": self.response_model.max_roll_deg,
+            "effective_max_pitch_deg": max(
+                self.response_model.max_pitch_up_deg,
+                self.response_model.max_pitch_down_deg,
+            ),
+            "tracking_tuning_revision": self.tuning.revision,
+            "runtime_metrics": {} if self.runtime is None else self.runtime.metrics.summary(),
+            "runtime_active": self.running,
+            "failsafe": failsafe,
+        }
+        if reason is not None:
+            payload["failsafe_reason"] = reason
+        stt.write_demand_state(DEMAND_STATE_PATH, payload)
+
+
 def camera_bridge_command(video_source: str, rtsp_url: str) -> list[str]:
     sink = [
         "!",
@@ -1588,6 +2206,7 @@ class AppState:
             ],
             LOG_DIR / "steering.log",
         )
+        self.runtime_steering: RuntimeSteeringSession | None = None
         self.messages: list[str] = []
 
     def set_mavlink_endpoint(self, endpoint: str) -> str:
@@ -1809,6 +2428,30 @@ class AppState:
             camera_dir = active_camera_dir()
             if camera_dir is None:
                 return f"steering blocked reason=stale_camera detail={ready_message}"
+        if self.profile.mode == "plane" and os.environ.get("VULTURE_X_LEGACY_STEERING") != "1":
+            if self.runtime_steering is not None and self.runtime_steering.running:
+                return "runtime steering already running"
+            self.steering.stop()
+            runtime_session = RuntimeSteeringSession(
+                mavlink_endpoint=mavlink_endpoint,
+                video_source=self.video_source,
+                rtsp_url=self.rtsp_url,
+                camera_dir=camera_dir,
+                tracking_mode=tracking_mode,
+                rate_hz=rate_hz,
+                surface_test=surface_test,
+                tuning_values=plane_tuning_values,
+                simulator_mode=self.simulator_mode,
+            )
+            try:
+                message = runtime_session.start()
+            except Exception as exc:
+                runtime_session.close()
+                return f"runtime steering blocked reason={type(exc).__name__}"
+            if not message.startswith("runtime steering started"):
+                return message
+            self.runtime_steering = runtime_session
+            return message
         self.steering.command = [
             sys.executable,
             "tools/sitl_track_target.py",
@@ -1968,6 +2611,12 @@ class AppState:
                 connection.close()
 
     def stop_steering(self) -> str:
+        if self.runtime_steering is not None and self.runtime_steering.running:
+            stop_message = self.runtime_steering.stop(
+                request_auto=self.profile.mode == "plane" and self.simulator_mode
+            )
+            self.runtime_steering = None
+            return stop_message
         stop_message = self.steering.stop()
         auto_message = self.set_plane_auto()
         if auto_message.startswith("auto skipped"):
@@ -2026,6 +2675,9 @@ class AppState:
         return messages
 
     def stop_all(self) -> list[str]:
+        if self.runtime_steering is not None:
+            self.runtime_steering.stop(request_auto=False)
+            self.runtime_steering = None
         messages = [
             self.steering.stop(),
             self.takeoff.stop(),
@@ -2528,12 +3180,59 @@ def send_client_heartbeat(connection: mavutil.mavfile) -> None:
     )
 
 
+def latest_runtime_target(
+    *,
+    hud_mode: str = "operational",
+    hud_enabled: bool = True,
+) -> tuple[dict[str, Any], bytes | None] | None:
+    session = STATE.runtime_steering
+    if session is None or not session.running:
+        return None
+    snapshot = session.snapshot()
+    if snapshot is None or snapshot.frame is None:
+        return {"detected": False, "detail": "runtime frame unavailable"}, None
+    tracking = snapshot.tracking
+    demand = load_demand_state()
+    if tracking is None:
+        target: dict[str, Any] = {"detected": False, "detail": "runtime tracking unavailable"}
+    elif tracking.detected and tracking.bbox is not None:
+        target = {
+            "detected": True,
+            "mode": tracking.mode,
+            "bbox": list(tracking.bbox),
+            "center_x": tracking.center_x,
+            "center_y": tracking.center_y,
+            "runtime": True,
+        }
+    else:
+        target = {
+            "detected": False,
+            "mode": "runtime",
+            "detail": "runtime tracking lost",
+            "runtime": True,
+        }
+
+    def render(image: Any, runtime_snapshot: RuntimeSnapshot) -> None:
+        del runtime_snapshot
+        render_hud(image, target, demand, mavlink_status(), [], normalize_hud_mode(hud_mode))
+
+    image = encode_runtime_preview_jpeg(
+        snapshot.frame,
+        snapshot,
+        hud_renderer=render if hud_enabled else None,
+    )
+    return target, image
+
+
 def latest_target(
     display_mode: str = "red",
     *,
     hud_mode: str = "operational",
     hud_enabled: bool = True,
 ) -> tuple[dict[str, Any], bytes | None]:
+    runtime_target = latest_runtime_target(hud_mode=hud_mode, hud_enabled=hud_enabled)
+    if runtime_target is not None:
+        return runtime_target
     if display_mode not in {"red", "banner", "custom", "head", "person"}:
         display_mode = "red"
     camera_dir = active_camera_dir()
@@ -2966,6 +3665,11 @@ def status_payload(display_mode: str = "red") -> dict[str, Any]:
     target, _ = latest_target(display_mode, hud_enabled=False)
     port_5600_owners = udp_port_owners(5600)
     camera_dir = active_camera_dir()
+    runtime_snapshot = (
+        STATE.runtime_steering.snapshot()
+        if STATE.runtime_steering is not None and STATE.runtime_steering.running
+        else None
+    )
     if camera_dir is None and (
         STATE.bridge.running() or process_running(r"gst-launch-1.0 .*port=5600")
     ):
@@ -2985,7 +3689,8 @@ def status_payload(display_mode: str = "red") -> dict[str, Any]:
             "target_motion": STATE.target_motion.running()
             or process_running(r"move_gazebo_target.py"),
             "takeoff": STATE.takeoff.running(),
-            "steering": STATE.steering.running(),
+            "steering": STATE.steering.running()
+            or (STATE.runtime_steering is not None and STATE.runtime_steering.running),
         },
         "mavlink": mavlink_status(),
         "target": target,
@@ -3001,6 +3706,20 @@ def status_payload(display_mode: str = "red") -> dict[str, Any]:
         },
         "runtime": {
             "simulator": STATE.simulator_mode,
+            "active": STATE.runtime_steering is not None and STATE.runtime_steering.running,
+            "workers": (
+                {}
+                if runtime_snapshot is None
+                else {
+                    name: {
+                        "running": health.running,
+                        "heartbeat_ns": health.heartbeat_ns,
+                        "fault": health.fault,
+                    }
+                    for name, health in runtime_snapshot.workers.items()
+                }
+            ),
+            "metrics": {} if runtime_snapshot is None else runtime_snapshot.metrics,
         },
         "demand": load_demand_state() or {},
         "selection": selection_payload(),

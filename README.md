@@ -27,6 +27,9 @@ Implemented:
 - unit and mocked integration tests.
 - UI launcher selection for the existing quadcopter profile and a fixed-wing
   ArduPlane/Gazebo Zephyr profile.
+- in-process runtime primitives and fixed-wing WebUI runtime integration for
+  latest-frame buffering, capture/vision/MAVLink-RX/control workers, appsink
+  capture, runtime metrics, and single-encode preview rendering.
 
 Not implemented:
 
@@ -38,6 +41,8 @@ Not implemented:
 - V4L2/video-file capture and real analog hardware;
 - ELRS transport;
 - mission behavior after `TRACK`.
+- full quad WebUI migration from the legacy tracking subprocess to the new
+  single-process runtime.
 
 The mock vehicle never communicates with hardware. Do not interpret this
 milestone as SITL, HIL, or flight readiness.
@@ -74,6 +79,12 @@ defaults after cloning. If a checkout is missing those files, restore them with:
 
 ```bash
 python tools/ensure_vision_models.py --download
+```
+
+Inspect the runtime architecture notes and non-flight benchmark helper:
+
+```bash
+python tools/runtime_benchmark.py --backend file --camera-dir logs/ui/camera --duration-s 5
 ```
 
 The normal bootstrap is safe and has no vehicle command authority:

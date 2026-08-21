@@ -9,6 +9,8 @@ from types import ModuleType, SimpleNamespace
 import cv2
 import numpy as np
 
+from vulture_x.runtime.state import VehicleSnapshot
+
 
 def load_ui_module() -> ModuleType:
     tools_dir = Path("tools").resolve()
@@ -188,6 +190,7 @@ def test_tracking_tuning_write_is_atomic_and_clamped(tmp_path: Path) -> None:
 
 def test_app_state_configures_plane_commands(tmp_path: Path, monkeypatch) -> None:
     module = load_ui_module()
+    monkeypatch.setenv("VULTURE_X_LEGACY_STEERING", "1")
     module.LOG_DIR = tmp_path
     module.CAMERA_DIR = tmp_path / "camera_frames"
     module.CAMERA_DIR.mkdir(parents=True)
@@ -311,11 +314,224 @@ def test_app_state_configures_plane_commands(tmp_path: Path, monkeypatch) -> Non
     )
 
 
+def test_app_state_plane_start_uses_runtime_by_default(tmp_path: Path, monkeypatch) -> None:
+    module = load_ui_module()
+    module.LOG_DIR = tmp_path
+    module.CAMERA_DIR = tmp_path / "camera_frames"
+    module.CAMERA_DIR.mkdir(parents=True)
+    (module.CAMERA_DIR / "frame-000001.jpg").write_bytes(b"not-a-real-test-image")
+    subprocess_starts: list[str] = []
+    runtime_starts: list[object] = []
+    monkeypatch.setattr(
+        module.ManagedProcess,
+        "start",
+        lambda self: subprocess_starts.append(self.name) or "steering started",
+    )
+
+    class FakeRuntimeSteeringSession:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+            self.running = False
+
+        def start(self) -> str:
+            self.running = True
+            runtime_starts.append(self)
+            return "runtime steering started"
+
+        def stop(self, *, request_auto: bool) -> str:
+            self.running = False
+            self.request_auto = request_auto
+            return "runtime steering stopped"
+
+    monkeypatch.setattr(module, "RuntimeSteeringSession", FakeRuntimeSteeringSession)
+    state = module.AppState(module.VEHICLE_PROFILES["plane"])
+
+    assert (
+        state.start_steering(
+            forward_mps=20,
+            rate_hz=10,
+            max_down_mps=10,
+            vertical_gain=52,
+            plane_centering_gain=1.15,
+            plane_near_centering_gain=2.15,
+            plane_damping_gain=0.22,
+            plane_near_damping_gain=0.45,
+            plane_far_control_scale=0.55,
+            max_plane_pitch_deg=40,
+            plane_pitch_gain_scale=1.10,
+            plane_pitch_near_gain_scale=1.45,
+            plane_pitch_below_center_boost=0.25,
+            plane_pitch_filter_alpha=0.45,
+            plane_max_pitch_step_deg=2.0,
+            plane_max_roll_step_deg=3.0,
+            plane_loss_hold_s=1.5,
+            tracking_mode="banner",
+            mavlink_endpoint="udpcl:192.168.144.12:19856",
+        )
+        == "runtime steering started"
+    )
+
+    assert runtime_starts
+    assert subprocess_starts == []
+    assert state.runtime_steering is runtime_starts[0]
+    assert runtime_starts[0].kwargs["mavlink_endpoint"] == "udpcl:192.168.144.12:19856"
+
+
+def test_app_state_stop_shuts_runtime_without_legacy_subprocess(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = load_ui_module()
+    module.LOG_DIR = tmp_path
+    state = module.AppState(module.VEHICLE_PROFILES["plane"])
+    state.configure_runtime_io(simulator=True)
+    stopped: list[bool] = []
+
+    class FakeRuntime:
+        running = True
+
+        def stop(self, *, request_auto: bool) -> str:
+            stopped.append(request_auto)
+            self.running = False
+            return "runtime steering stopped"
+
+    state.runtime_steering = FakeRuntime()
+
+    assert state.stop_steering() == "runtime steering stopped"
+    assert stopped == [True]
+    assert state.runtime_steering is None
+
+
+def test_runtime_session_pilot_takeover_releases_without_auto(monkeypatch) -> None:
+    module = load_ui_module()
+    auto_calls: list[object] = []
+
+    class FakeConnection:
+        def set_mode(self, mode: object) -> None:
+            auto_calls.append(mode)
+
+    session = object.__new__(module.RuntimeSteeringSession)
+    session.abort_reason = None
+    session.connection = FakeConnection()
+    session.control_authority_active = True
+    session.plane_tracking_started = True
+    session.runtime = None
+    session.running = True
+    session.last_command_ns = None
+    session.tracker_engine_name = "TEMPLATE"
+    session.response_model = module.stt.plane_response_model_from_params(
+        module.stt.PlaneTrackingTuning(
+            revision=0,
+            vertical_gain=52.0,
+            plane_centering_gain=1.55,
+            plane_near_centering_gain=2.65,
+            plane_roll_gain_scale=1.75,
+            plane_pitch_gain_scale=1.20,
+            plane_pitch_near_gain_scale=1.60,
+            plane_error_deadband=0.015,
+            plane_lead_s=0.0,
+            plane_damping_gain=0.14,
+            plane_near_damping_gain=0.30,
+            plane_pitch_filter_alpha=0.45,
+            plane_max_pitch_step_deg=2.0,
+            plane_max_roll_step_deg=6.0,
+            max_plane_roll_deg=35.0,
+            max_plane_pitch_deg=40.0,
+            plane_near_pitch_down_limit_deg=40.0,
+            plane_far_control_scale=0.72,
+            plane_near_control_scale=1.0,
+            plane_camera_hfov_deg=70.0,
+            plane_proximity_far_size=0.025,
+            plane_proximity_near_size=0.16,
+            plane_airspeed_mps=20.0,
+            plane_throttle=0.55,
+            plane_throttle_airspeed_gain=0.04,
+            plane_min_throttle=0.25,
+            plane_max_throttle=0.80,
+            plane_near_throttle_reduction=0.0,
+            plane_pitch_below_center_boost=0.25,
+            plane_loss_hold_s=1.5,
+            min_tracking_alt_m=15.0,
+            airspeed_low_persistence_s=2.0,
+        ),
+        {},
+    )
+    session.tracking_mode = "banner"
+    session.rate_hz = 30.0
+    session.tuning = module.stt.plane_tuning_from_args(
+        type(
+            "Args",
+            (),
+            {
+                "vertical_gain": 52.0,
+                "plane_centering_gain": 1.55,
+                "plane_near_centering_gain": 2.65,
+                "plane_roll_gain_scale": 1.75,
+                "plane_pitch_gain_scale": 1.20,
+                "plane_pitch_near_gain_scale": 1.60,
+                "plane_error_deadband": 0.015,
+                "plane_lead_s": 0.0,
+                "plane_damping_gain": 0.14,
+                "plane_near_damping_gain": 0.30,
+                "plane_pitch_filter_alpha": 0.45,
+                "plane_max_pitch_step_deg": 2.0,
+                "plane_max_roll_step_deg": 6.0,
+                "max_plane_roll_deg": 35.0,
+                "max_plane_pitch_deg": 40.0,
+                "plane_near_pitch_down_limit_deg": 40.0,
+                "plane_far_control_scale": 0.72,
+                "plane_near_control_scale": 1.0,
+                "plane_camera_hfov_deg": 70.0,
+                "plane_proximity_far_size": 0.025,
+                "plane_proximity_near_size": 0.16,
+                "plane_airspeed_mps": 20.0,
+                "plane_throttle": 0.55,
+                "plane_throttle_airspeed_gain": 0.04,
+                "plane_min_throttle": 0.25,
+                "plane_max_throttle": 0.80,
+                "plane_near_throttle_reduction": 0.0,
+                "plane_pitch_below_center_boost": 0.25,
+                "plane_loss_hold_s": 1.5,
+                "min_tracking_alt_m": 15.0,
+                "airspeed_low_persistence_s": 2.0,
+            },
+        )()
+    )
+    released: list[object] = []
+    monkeypatch.setattr(module.stt, "release_rc_override", released.append)
+    vehicle = VehicleSnapshot(
+        timestamp_ns=10_000_000,
+        heartbeat_timestamp_ns=10_000_000,
+        mode="MANUAL",
+        armed=True,
+        relative_altitude_m=50.0,
+        airspeed_mps=20.0,
+        connected=True,
+    )
+    inputs = module.ControlInputs(
+        now_ns=10_000_000,
+        frame=None,
+        tracking=None,
+        vehicle=vehicle,
+        frame_age_ms=0.0,
+        tracking_result_age_ms=None,
+        heartbeat_age_ms=0.0,
+    )
+
+    session._control_step(inputs)
+
+    assert session.abort_reason == "pilot_mode_change"
+    assert session.control_authority_active is False
+    assert released == [session.connection]
+    assert auto_calls == []
+
+
 def test_app_state_configures_plane_surface_test_command(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     module = load_ui_module()
+    monkeypatch.setenv("VULTURE_X_LEGACY_STEERING", "1")
     module.LOG_DIR = tmp_path
     module.CAMERA_DIR = tmp_path / "camera_frames"
     module.SELECTION_PATH = tmp_path / "custom_selection.json"
@@ -374,6 +590,7 @@ def test_simulator_plane_ground_test_uses_zero_throttle(
     monkeypatch,
 ) -> None:
     module = load_ui_module()
+    monkeypatch.setenv("VULTURE_X_LEGACY_STEERING", "1")
     module.LOG_DIR = tmp_path
     module.CAMERA_DIR = tmp_path / "camera_frames"
     module.SELECTION_PATH = tmp_path / "custom_selection.json"
@@ -432,6 +649,7 @@ def test_simulator_plane_tracking_uses_eighty_percent_throttle(
     monkeypatch,
 ) -> None:
     module = load_ui_module()
+    monkeypatch.setenv("VULTURE_X_LEGACY_STEERING", "1")
     module.LOG_DIR = tmp_path
     module.CAMERA_DIR = tmp_path / "camera_frames"
     module.TRACKING_TUNING_PATH = tmp_path / "tracking_tuning.json"
@@ -481,6 +699,7 @@ def test_app_state_surface_test_tracks_red_without_manual_selection(
     monkeypatch,
 ) -> None:
     module = load_ui_module()
+    monkeypatch.setenv("VULTURE_X_LEGACY_STEERING", "1")
     module.LOG_DIR = tmp_path
     module.CAMERA_DIR = tmp_path / "camera_frames"
     module.SELECTION_PATH = tmp_path / "custom_selection.json"
@@ -528,6 +747,7 @@ def test_app_state_surface_test_tracks_selected_head(
     monkeypatch,
 ) -> None:
     module = load_ui_module()
+    monkeypatch.setenv("VULTURE_X_LEGACY_STEERING", "1")
     module.LOG_DIR = tmp_path
     module.CAMERA_DIR = tmp_path / "camera_frames"
     module.SELECTION_PATH = tmp_path / "custom_selection.json"
